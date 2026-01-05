@@ -1,0 +1,8 @@
+[server]
+headless = true
+enableCORS = false
+enableXsrfProtection = true
+
+# For local dev, leave baseUrlPath empty.
+# On the server behind /snow-ops/app/, we will set:
+# baseUrlPath = "snow-ops/app"
