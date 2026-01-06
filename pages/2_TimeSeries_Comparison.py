@@ -1,10 +1,11 @@
+import re
 import streamlit as st
 import pandas as pd
 from pathlib import Path
 import plotly.graph_objects as go
 
 st.set_page_config(page_title="SWE Time Series Compare", layout="wide")
-st.title("SWE Time Series Comparison (WY2026)")
+st.title("SWE Time Series Comparison")
 
 DATA_ROOT = Path("data/basins")
 
@@ -16,16 +17,20 @@ def list_basins(root: Path) -> list[str]:
         return []
     return sorted([p.name for p in root.iterdir() if p.is_dir() and not p.name.startswith(".")])
 
-def load_timeseries_parquet(path: Path) -> pd.DataFrame:
+@st.cache_data(show_spinner=False)
+def load_timeseries_parquet(path_str: str) -> pd.DataFrame:
     """Load a parquet with Date column + band columns."""
+    path = Path(path_str)
     df = pd.read_parquet(path)
     if "Date" not in df.columns:
         raise ValueError(f"{path} is missing a 'Date' column.")
     df["Date"] = pd.to_datetime(df["Date"])
     return df.sort_values("Date").set_index("Date")
 
-def load_mlr_parquet(path: Path) -> pd.DataFrame:
+@st.cache_data(show_spinner=False)
+def load_mlr_parquet(path_str: str) -> pd.DataFrame:
     """Load MLR predictions parquet with Date + Training Infer NaNs + bands + Basin."""
+    path = Path(path_str)
     df = pd.read_parquet(path)
     if "Date" not in df.columns:
         raise ValueError(f"{path} is missing a 'Date' column.")
@@ -84,6 +89,73 @@ def common_window_from_series(series_list: list[pd.Series]) -> tuple[pd.Timestam
         raise ValueError("Cannot compute common date window (one or more series is empty).")
     return max(mins), min(maxs)
 
+def extract_wy_from_name(filename: str) -> int | None:
+    """
+    Extract water year from names containing 'wyYYYY' (case-insensitive).
+    """
+    m = re.search(r"wy(\d{4})", filename, flags=re.IGNORECASE)
+    return int(m.group(1)) if m else None
+
+def available_wys_for_selection(
+    basin_root: Path,
+    seasonal_dir: str,
+    mlr_suffix: str,
+    units_choice: str,
+    cfg: dict,
+) -> list[int]:
+    """
+    Find WYs available for this basin/seasonal/units combination by scanning:
+      - MLR prediction_{suffix}_wyYYYY.parquet in mlr_prediction/{seasonal_dir}/
+      - UASWE mean_swe_uaswe_{m|acreFt}_wyYYYY.parquet
+      - SNODAS mean_swe_snodas_{m|acreFt}_wyYYYY.parquet
+
+    Returns intersection set (WYs present in all three sources), sorted.
+    """
+    # MLR files
+    mlr_dir = basin_root / "mlr_prediction" / seasonal_dir
+    mlr_wys = set()
+    if mlr_dir.exists():
+        pat = re.compile(rf"^prediction_{re.escape(mlr_suffix)}_wy\d{{4}}\.parquet$", re.IGNORECASE)
+        for p in mlr_dir.glob("*.parquet"):
+            if pat.match(p.name):
+                wy = extract_wy_from_name(p.name)
+                if wy:
+                    mlr_wys.add(wy)
+
+    # UASWE/SNODAS files depend on units config
+    uaswe_pat = (
+        re.compile(r"^mean_swe_uaswe_m_wy\d{4}\.parquet$", re.IGNORECASE)
+        if cfg["uaswe_kind"] == "depth_m"
+        else re.compile(r"^mean_swe_uaswe_acreFt_wy\d{4}\.parquet$", re.IGNORECASE)
+    )
+    snodas_pat = (
+        re.compile(r"^mean_swe_snodas_m_wy\d{4}\.parquet$", re.IGNORECASE)
+        if cfg["snodas_kind"] == "depth_m"
+        else re.compile(r"^mean_swe_snodas_acreFt_wy\d{4}\.parquet$", re.IGNORECASE)
+    )
+
+    uaswe_dir = basin_root / "uaswe"
+    snodas_dir = basin_root / "snodas"
+
+    uaswe_wys = set()
+    if uaswe_dir.exists():
+        for p in uaswe_dir.glob("*.parquet"):
+            if uaswe_pat.match(p.name):
+                wy = extract_wy_from_name(p.name)
+                if wy:
+                    uaswe_wys.add(wy)
+
+    snodas_wys = set()
+    if snodas_dir.exists():
+        for p in snodas_dir.glob("*.parquet"):
+            if snodas_pat.match(p.name):
+                wy = extract_wy_from_name(p.name)
+                if wy:
+                    snodas_wys.add(wy)
+
+    common = mlr_wys & uaswe_wys & snodas_wys
+    return sorted(common)
+
 # -----------------------------
 # Constants / maps
 # -----------------------------
@@ -119,7 +191,7 @@ UNITS_CFG = {
 }
 
 # -----------------------------
-# Top controls (Elevation Band at top; Basin in sidebar)
+# Top controls
 # -----------------------------
 top_left, top_mid, top_right = st.columns([1.2, 1.2, 1.4])
 with top_left:
@@ -133,6 +205,9 @@ with top_mid:
 with top_right:
     units_choice = st.selectbox("Units", ["milimeters", "thousand acre-ft"], index=0)
 
+# -----------------------------
+# Sidebar controls
+# -----------------------------
 basins = list_basins(DATA_ROOT)
 if not basins:
     st.error(f"No basins found under: {DATA_ROOT.resolve()}")
@@ -145,24 +220,48 @@ with st.sidebar:
     st.divider()
     show_table = st.checkbox("Show merged table", value=False)
 
-# -----------------------------
-# Resolve filepaths
-# -----------------------------
 basin_root = DATA_ROOT / basin
 seasonal_dir = SEASONAL_DIR_MAP[seasonal_choice]
 cfg = UNITS_CFG[units_choice]
 
-# (Change requested) remove "_combination" from MLR filenames
-PATH_MLR = basin_root / f"mlr_prediction/{seasonal_dir}/prediction_{cfg['mlr_suffix']}_wy2026.parquet"
-
-# UASWE/SNODAS paths depend on Units selection
-PATH_UASWE = (
-    basin_root / ("uaswe/mean_swe_uaswe_m_wy2026.parquet" if cfg["uaswe_kind"] == "depth_m"
-                  else "uaswe/mean_swe_uaswe_acreFt_wy2026.parquet")
+# -----------------------------
+# WY dropdown (auto-detect)
+# -----------------------------
+wys = available_wys_for_selection(
+    basin_root=basin_root,
+    seasonal_dir=seasonal_dir,
+    mlr_suffix=cfg["mlr_suffix"],
+    units_choice=units_choice,
+    cfg=cfg,
 )
-PATH_SNODAS = (
-    basin_root / ("snodas/mean_swe_snodas_m_wy2026.parquet" if cfg["snodas_kind"] == "depth_m"
-                  else "snodas/mean_swe_snodas_acreFt_wy2026.parquet")
+
+if not wys:
+    st.error(
+        f"No common WYs found for {basin} / {seasonal_choice} / {units_choice}.\n\n"
+        "Expected patterns:\n"
+        f"- {basin_root}/mlr_prediction/{seasonal_dir}/prediction_{cfg['mlr_suffix']}_wyYYYY.parquet\n"
+        f"- {basin_root}/uaswe/mean_swe_uaswe_{'m' if cfg['uaswe_kind']=='depth_m' else 'acreFt'}_wyYYYY.parquet\n"
+        f"- {basin_root}/snodas/mean_swe_snodas_{'m' if cfg['snodas_kind']=='depth_m' else 'acreFt'}_wyYYYY.parquet\n"
+    )
+    st.stop()
+
+default_wy = max(wys)
+wy = st.selectbox("Water Year", wys, index=wys.index(default_wy))
+
+# -----------------------------
+# Resolve filepaths for selected WY
+# -----------------------------
+PATH_MLR = basin_root / f"mlr_prediction/{seasonal_dir}/prediction_{cfg['mlr_suffix']}_wy{wy}.parquet"
+
+PATH_UASWE = basin_root / (
+    f"uaswe/mean_swe_uaswe_m_wy{wy}.parquet"
+    if cfg["uaswe_kind"] == "depth_m"
+    else f"uaswe/mean_swe_uaswe_acreFt_wy{wy}.parquet"
+)
+PATH_SNODAS = basin_root / (
+    f"snodas/mean_swe_snodas_m_wy{wy}.parquet"
+    if cfg["snodas_kind"] == "depth_m"
+    else f"snodas/mean_swe_snodas_acreFt_wy{wy}.parquet"
 )
 
 missing = [p for p in [PATH_MLR, PATH_UASWE, PATH_SNODAS] if not p.exists()]
@@ -174,12 +273,12 @@ if missing:
     st.stop()
 
 # -----------------------------
-# Load data
+# Load data (cached)
 # -----------------------------
-with st.spinner(f"Loading data for {basin} ({seasonal_choice}, {units_choice})..."):
-    df_mlr_raw = load_mlr_parquet(PATH_MLR)
-    df_uaswe = load_timeseries_parquet(PATH_UASWE)
-    df_snodas = load_timeseries_parquet(PATH_SNODAS)
+with st.spinner(f"Loading data for {basin} (WY{wy}, {seasonal_choice}, {units_choice})..."):
+    df_mlr_raw = load_mlr_parquet(str(PATH_MLR))
+    df_uaswe = load_timeseries_parquet(str(PATH_UASWE))
+    df_snodas = load_timeseries_parquet(str(PATH_SNODAS))
 
 # -----------------------------
 # Resolve columns
@@ -244,7 +343,7 @@ st.caption(f"Plot window (intersection): {t_min.date()} to {t_max.date()}")
 # -----------------------------
 fig = go.Figure()
 
-# MLR group (similar styling family)
+# MLR group
 fig.add_trace(
     go.Scatter(
         x=s_mlr_drop.index, y=s_mlr_drop.values,
@@ -262,12 +361,12 @@ fig.add_trace(
         mode="lines",
         name="predict NaNs",
         legendgroup="MLR",
-        line=dict(dash="solid"),
+        line=dict(dash="dash"),
         hovertemplate="Date=%{x|%Y-%m-%d}<br>Value=%{y:.2f}<extra></extra>",
     )
 )
 
-# Other models group (similar styling family)
+# Other models group
 fig.add_trace(
     go.Scatter(
         x=s_uaswe.index, y=s_uaswe.values,
@@ -292,7 +391,7 @@ fig.add_trace(
 
 fig.update_layout(
     title=dict(
-        text=f"{basin} – {seasonal_choice} – {band}",
+        text=f"{basin} – WY{wy} – {seasonal_choice} – {band}",
         x=0.5,
         xanchor="center",
         y=0.98,
@@ -302,33 +401,18 @@ fig.update_layout(
     xaxis_title="Date",
     yaxis_title=cfg["y_label"],
     hovermode="x unified",
-
-    # Legend placed cleanly between title and plot
     legend=dict(
         orientation="h",
         yanchor="top",
         y=0.92,
         xanchor="center",
         x=0.5,
-        title_text=None,  # legend group titles still show
+        title_text=None,
     ),
-
-    # Extra top margin to avoid collisions
-    margin=dict(
-        l=20,
-        r=20,
-        t=140,   # <-- key change
-        b=20,
-    ),
+    margin=dict(l=20, r=20, t=140, b=20),
 )
 
-
 st.plotly_chart(fig, use_container_width=True)
-
-# st.caption(
-#     f"Basin: {basin} | Seasonal: {seasonal_choice} | Band: {band} | Units: {cfg['y_label']}. "
-#     f"{cfg['other_note']}"
-# )
 
 # -----------------------------
 # Optional merged table
