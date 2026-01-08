@@ -43,6 +43,7 @@ data_filepaths:
   snodas_dir: /home/rossamower/work/aso/data/snodas/USCASJ/
   insitu_dir: /home/rossamower/work/aso/data/insitu/USCASJ/
   mlrPred_dir: /home/rossamower/work/aso/data/mlr_prediction/USCASJ/
+  imputation_dir: /home/rossamower/work/aso/data/mlr_prediction/USCASJ/imputation/
 pillow_api:
   pil_names: AGP,BCB,BGP,BSH,CHM,DAN,DPO,FLV,GEM,GRM,GRV,HNT,KSP,KUB,KUP,LLE,MAM,MHP,PSR,SLK,SNF,STL,STR,SWM,TMR,TNY,TUM,UBC,VLC,WWC
   snotel_rename:

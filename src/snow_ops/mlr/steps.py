@@ -7,6 +7,27 @@ import os
 import copy
 
 
+def load_melt_imputation_tables(
+    melt_threshold_dir: str,
+    pillow_imputation_dir: str,
+    water_year: int,
+    melt_threshold_dir_fname: str = 'melt_threshold.csv',
+    pillow_imputation_dir_fname: str = 'pillow_impute_threePils_wy',
+    snowmodel_imputation_dir_fname: str = 'pillow_impute_threeSnowModelGrids_wy',
+):
+    """
+    Load melt threshold and pillow imputation tables from specified directories.
+    """
+    melt_threshold_path = os.path.join(melt_threshold_dir, melt_threshold_dir_fname)
+    pillow_imputation_path = os.path.join(pillow_imputation_dir, f"{pillow_imputation_dir_fname}{water_year}.csv")
+    snowmodel_imputation_path = os.path.join(pillow_imputation_dir, f"{snowmodel_imputation_dir_fname}{water_year}.csv")
+
+    melt_threshold_df = pd.read_csv(melt_threshold_path) if os.path.exists(melt_threshold_path) else None
+    pillow_imputation_df = pd.read_csv(pillow_imputation_path) if os.path.exists(pillow_imputation_path) else None
+    snowmodel_imputation_df = pd.read_csv(snowmodel_imputation_path) if os.path.exists(snowmodel_imputation_path) else None
+
+    return melt_threshold_df, pillow_imputation_df, snowmodel_imputation_df
+
 def dataset_to_list(ds: xr.Dataset) -> list:
     da_list = []
     for pil in ds.data_vars:
@@ -184,6 +205,73 @@ def create_qa_tables(obs_data, missing_stations, isQA=True):
         return all_df, qa_df
     else:
         return all_df
+    
+def create_qa_tables_cp(obs_data, missing_stations, isQA=True):
+    """
+    Same as your existing helper (copied in for drop-in convenience).
+    """
+    count = 0
+    for i in range(0, len(obs_data)):
+        df = obs_data[i].to_dataframe().reset_index()
+        df["time"] = df["time"].dt.date
+        df = df.set_index("time")
+        if count == 0:
+            all_df = copy.deepcopy(df)
+        else:
+            all_df = pd.merge(all_df, df, how="left", on="time")
+        count += 1
+
+    all_df = all_df.reset_index()
+    all_df["time"] = pd.to_datetime(all_df["time"])
+    all_df = all_df.set_index("time")
+
+    if isQA:
+        qa_df = copy.deepcopy(all_df)
+        for col in all_df.columns:
+            qa_df[col] = 0
+        for pil in missing_stations:
+            qa_df[pil] = 1
+        return qa_df
+    else:
+        return all_df
+    
+
+def process_daily_qa(
+                     t_idx: int, 
+                     obs_data_raw: list,
+                     obs_data_qa: list,
+                     baseline_pils: list,
+                     printOutput: bool = False,
+                    ):
+    """
+    """ 
+    # all pils
+    all_pils = [i.name for i in obs_data_raw]
+    # current day raw values.
+    obs_data_current_day = [i.isel({'time':t_idx}) for i in obs_data_raw]
+    # current day qa values.
+    obs_data_qa_current_day = [i.isel({'time':t_idx}) for i in obs_data_qa]
+    # missing stations.
+    missing_stations = [i.name for i in obs_data_current_day if i.isnull()]
+    # mission stations and failing qa.
+    nan_stations = [i.name for i in obs_data_qa_current_day if i.isnull()]
+    # stations failing qa.
+    qa_stations = [i for i in nan_stations if i not in missing_stations]
+    # create raw dataframe.
+    obs_data_raw_df = create_qa_tables(obs_data_raw,missing_stations = [],isQA=False)
+    # create qa dataframe.
+    obs_data_qa_df = create_qa_tables_cp(obs_data_qa,missing_stations = qa_stations,isQA=True)
+    # current day raw dataframe.
+    obs_day_raw_df = pd.DataFrame(obs_data_raw_df.iloc[t_idx]).T
+    # current day raw dataframe.
+    obs_day_qa_df = pd.DataFrame(obs_data_qa_df.iloc[t_idx]).T
+
+
+    # all_pils_QA
+    all_pils_QA = [i for i in all_pils if i not in nan_stations]    
+    baseline_pils_ = [i for i in baseline_pils if i not in nan_stations]
+    
+    return obs_day_raw_df,all_pils_QA,baseline_pils_,obs_day_qa_df
     
 
 # def imputation_w_pillows(df_sum_total: pd.DataFrame,

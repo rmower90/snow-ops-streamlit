@@ -1,6 +1,7 @@
 # src/snow_ops/mlr/preprocess.py
 from __future__ import annotations
 
+import os
 from pathlib import Path
 from typing import Dict, Any
 
@@ -14,6 +15,7 @@ from snow_ops.mlr.steps import (
     train_test_split,
     combine_aso_insitu,
     generate_drop_NaNs_table,
+    load_melt_imputation_tables,
     create_qa_tables,  # imported for later use; not strictly required yet
 
 )
@@ -87,6 +89,7 @@ def band_to_elev_idx(cfg: dict, band: str) -> int:
     return labels.index(band)
 
 
+
 def run_preprocessing_only(
     basin: str,
     water_year: int,
@@ -134,6 +137,10 @@ def run_preprocessing_only(
         # Optional SnowModel correlation zarrs (may not exist locally)
         "snowmodel_train_zarr": basin_root / "snowmodel/hrrr_correlated_train_2017_2025_dowy.zarr",
         "snowmodel_test_zarr": basin_root / f"snowmodel/hrrr_correlated_test_{water_year}.zarr",
+
+        # imputation_dir 
+        "imputation_dir": basin_root / "mlr_prediction/imputation/",
+        "melt_threshold_dir": basin_root / "mlr_prediction/melt_threshold/",
     }
         # Selected pillows dataset (driven by UI)
     if pillow_source == "Test (raw download)":
@@ -298,6 +305,12 @@ def run_preprocessing_only(
         df_summary_table=df_sum_total,
         obs_data=insitu_qa,
     )
+    # load melt threshold and imputation csv files 
+    melt_threshold_df, pillow_imputation_df, snowmodel_imputation_df = load_melt_imputation_tables(
+        melt_threshold_dir=str(paths["melt_threshold_dir"]),
+        pillow_imputation_dir=str(paths["imputation_dir"]),
+        water_year=water_year
+    ) 
 
 
     # Keep this available for later plots/debug (not always needed)
@@ -321,5 +334,38 @@ def run_preprocessing_only(
 
     out["df_sum_total"] = df_sum_total
     out["drop_na_df"] = drop_na_df
+
+    out["baseline_pils"] = baseline_pils
+    out["all_pils"] = all_pils
+
+    out["obs_test_raw_ds"] = obs_test_raw_ds
+    out["obs_test_proc_ds"] = obs_test_proc_ds
+
+    out["aso_tseries_ds"] = aso_tseries_ds
+
+    # after: obs_train_lst = dataset_to_list(obs_train_ds)
+    out["obs_train_lst"] = obs_train_lst
+
+    # keep these too
+    out["aso_tseries_da"] = aso_tseries_ds[aso_var]   # DataArray
+    out["start_wy"] = int(cfg["aso_years"]["start"])
+    out["end_wy"] = int(cfg["aso_years"]["end"])
+    out["baseline_pils"] = baseline_pils
+    out["all_pils"] = all_pils
+
+    # for daily QA on a selected date (WY-specific)
+    out["obs_test_raw_lst"] = dataset_to_list(obs_test_raw_ds)
+    out["obs_test_proc_lst"] = dataset_to_list(obs_test_proc_ds)
+
+    # extra csv paths.
+    # out["imputation_dir"] = str(paths["imputation_dir"])
+    # out["melt_threshold_dir"] = str(paths["melt_threshold_dir"])
+
+    # imputation and melt threshold tables.
+    out["melt_threshold_df"] = melt_threshold_df
+    out["pillow_imputation_df"] = pillow_imputation_df
+    out["snowmodel_imputation_df"] = snowmodel_imputation_df
+
+
 
     return out
