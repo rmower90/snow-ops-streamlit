@@ -1,3 +1,23 @@
+
+/**
+ * generateHTMLPreds.js (drop-in)
+ *
+ * Usage:
+ *   node generateHTMLPreds.js USCASJ [USCATM ...]
+ *   node generateHTMLPreds.js USCASJ --dropTrainInfer="drop NaNs"
+ *
+ * What it does:
+ *  - Recursively finds prediction_acreFt_wy*_combination.csv under ROOT/<BASIN>/
+ *  - Infers modelName + seasonality from path segments
+ *  - Picks lexicographically latest WY per (modelName, seasonality)
+ *  - Reads last 2 rows from each CSV and concatenates into one table
+ *  - Drops display columns in DROP_COLS
+ *  - Optionally drops rows where "Training Infer NaNs" == --dropTrainInfer value
+ *  - Appends a Timeseries image: <BASIN>_timeseries_plot.png
+ *  - Writes <BASIN>.html into the same directory as this script (so relative image works)
+ *  - If the PNG exists elsewhere under basinRoot, it copies it next to the HTML
+ */
+
 const fs = require("fs");
 const path = require("path");
 
@@ -6,6 +26,8 @@ const path = require("path");
 // --------------------------
 const ROOT = "/home/rossamower/work/aso/data/mlr_prediction";
 const SEASONALITIES = ["season", "accum", "melt"];
+const SCRIPT_DIR = __dirname;
+const OUT_DIR = SCRIPT_DIR;
 
 // match file pattern; if you truly only ever have one, you can hardcode instead
 function isPredictionCsv(filename) {
@@ -16,18 +38,35 @@ function isPredictionCsv(filename) {
   );
 }
 
-// columns to drop (exact matches)
+// columns to drop (exact matches) from DISPLAY (still available for filtering)
 const DROP_COLS = {
   "Prediction QA": true,
   "Model Type": true,
+  "Training Infer NaNs": true,
 };
 
 // --------------------------
 // Args
 // --------------------------
-const basins = process.argv.slice(2).map((b) => (b || "").trim()).filter(Boolean);
+let dropTrainInferValue = null;
+let basins = process.argv
+  .slice(2)
+  .filter(Boolean)
+  .filter((arg) => {
+    if (arg.indexOf("--dropTrainInfer=") === 0) {
+      dropTrainInferValue = arg.split("=").slice(1).join("=");
+      dropTrainInferValue = dropTrainInferValue.replace(/^["']|["']$/g, "");
+      return false;
+    }
+    return true;
+  })
+  .map((b) => (b || "").trim())
+  .filter(Boolean);
+
 if (basins.length === 0) {
-  console.error("Usage: node generateHTMLPred.js USCASJ [USCATM ...]");
+  console.error(
+    'Usage: node generateHTMLPreds.js USCASJ [USCATM ...] [--dropTrainInfer="drop NaNs"]'
+  );
   process.exit(1);
 }
 
@@ -69,7 +108,11 @@ function readLastTwoRows(csvPath, cb) {
     });
 
     if (lines.length < 3) {
-      return cb(new Error("CSV must contain a header row + at least 2 data rows: " + csvPath));
+      return cb(
+        new Error(
+          "CSV must contain a header row + at least 2 data rows: " + csvPath
+        )
+      );
     }
 
     var headerRaw = parseCSVLine(lines[0]);
@@ -118,29 +161,54 @@ function walkDir(dirPath, fileCb, doneCb) {
 }
 
 // --------------------------
-// Find prediction CSVs + infer modelName & seasonality from path
+// Infer modelName & seasonality from path
 // Expected tree anywhere under basin root:
 //   .../<MODELNAME>/<seasonality>/acreFt/prediction_acreFt_wyXXXX_combination.csv
 // --------------------------
 function inferModelAndSeasonality(csvPath) {
-  // Normalize split
   var parts = csvPath.split(path.sep);
 
-  // Find seasonality segment
   for (var i = 0; i < parts.length; i++) {
     var p = parts[i];
     if (SEASONALITIES.indexOf(p) > -1) {
       var seasonality = p;
-      // model name is the directory right before seasonality
-      var modelName = (i > 0) ? parts[i - 1] : "UNKNOWN_MODEL";
+      var modelName = i > 0 ? parts[i - 1] : "UNKNOWN_MODEL";
       return { modelName: modelName, seasonality: seasonality };
     }
   }
   return null;
 }
 
+// --------------------------
+// Timeseries PNG discovery
+// Priority:
+//  1) next to this JS file
+//  2) anywhere under basinRoot
+// --------------------------
+function findTimeseriesPng(basin, basinRoot, cb) {
+  var targetName = basin + "_timeseries_plot.png";
+
+  var scriptDirCandidate = path.join(SCRIPT_DIR, targetName);
+  fs.stat(scriptDirCandidate, function (err, st) {
+    if (!err && st && st.isFile()) {
+      return cb(null, scriptDirCandidate);
+    }
+
+    var found = null;
+    walkDir(
+      basinRoot,
+      function (fp) {
+        if (found) return;
+        if (path.basename(fp) === targetName) found = fp;
+      },
+      function () {
+        cb(null, found); // may be null
+      }
+    );
+  });
+}
+
 function buildHTMLForBasin(basin, basinRoot, cb) {
-  // Collect discovered csvs
   var discovered = []; // { csvPath, modelName, seasonality }
 
   walkDir(
@@ -152,8 +220,6 @@ function buildHTMLForBasin(basin, basinRoot, cb) {
       var inferred = inferModelAndSeasonality(fp);
       if (!inferred) return;
 
-      // also ensure it is under ".../<seasonality>/acreFt/<file>"
-      // (optional guard; keep it light)
       discovered.push({
         csvPath: fp,
         modelName: inferred.modelName,
@@ -167,24 +233,23 @@ function buildHTMLForBasin(basin, basinRoot, cb) {
         return cb(new Error("No prediction CSVs found under: " + basinRoot));
       }
 
-      // For each (modelName, seasonality) we only want ONE csv:
-      // if multiple years exist, pick lexicographically last filename (usually highest WY)
-      var pickedMap = {}; // key -> {csvPath, modelName, seasonality}
+      // Pick one CSV per (modelName, seasonality): choose lexicographically last filename
+      var pickedMap = {};
       discovered.forEach(function (d) {
         var key = d.modelName + "||" + d.seasonality;
         if (!pickedMap[key]) {
           pickedMap[key] = d;
         } else {
-          // choose later filename as "most recent"
           if (path.basename(d.csvPath) > path.basename(pickedMap[key].csvPath)) {
             pickedMap[key] = d;
           }
         }
       });
 
-      var picked = Object.keys(pickedMap).map(function (k) { return pickedMap[k]; });
+      var picked = Object.keys(pickedMap).map(function (k) {
+        return pickedMap[k];
+      });
 
-      // Read last two rows for each picked csv
       var pending = picked.length;
       var results = []; // {modelName, seasonality, headerRaw, rows}
       var firstHeaderRaw = null;
@@ -204,9 +269,16 @@ function buildHTMLForBasin(basin, basinRoot, cb) {
 
           pending--;
           if (pending === 0) {
-            // build a single concatenated table
-            var html = renderConcatenatedTableHTML(basin, results, firstHeaderRaw);
-            cb(null, html);
+            findTimeseriesPng(basin, basinRoot, function (_err3, pngAbsPath) {
+              var html = renderConcatenatedTableHTML(
+                basin,
+                results,
+                firstHeaderRaw,
+                pngAbsPath,
+                dropTrainInferValue
+              );
+              cb(null, { html: html, pngAbsPath: pngAbsPath });
+            });
           }
         });
       });
@@ -214,8 +286,14 @@ function buildHTMLForBasin(basin, basinRoot, cb) {
   );
 }
 
-function renderConcatenatedTableHTML(basin, results, headerRaw) {
-  // Keep original headers except drops
+function renderConcatenatedTableHTML(
+  basin,
+  results,
+  headerRaw,
+  pngAbsPathOrNull,
+  dropTrainInferValue
+) {
+  // Keep original headers except drops (DISPLAY only)
   var keepHeaders = headerRaw.filter(function (h) {
     return !DROP_COLS[h];
   });
@@ -227,17 +305,40 @@ function renderConcatenatedTableHTML(basin, results, headerRaw) {
   var headerIndexMap = {};
   for (var i = 0; i < headerRaw.length; i++) headerIndexMap[headerRaw[i]] = i;
 
+  var trainInferIdx = headerIndexMap["Training Infer NaNs"]; // may be undefined
+
   // Stable ordering: group by model name then seasonality (season, accum, melt)
   results.sort(function (a, b) {
     if (a.modelName < b.modelName) return -1;
     if (a.modelName > b.modelName) return 1;
-    return SEASONALITIES.indexOf(a.seasonality) - SEASONALITIES.indexOf(b.seasonality);
+    return (
+      SEASONALITIES.indexOf(a.seasonality) -
+      SEASONALITIES.indexOf(b.seasonality)
+    );
   });
 
-  // Flatten all rows
+  function parseYYYYMMDD(s) {
+  if (!s) return null;
+  var parts = String(s).trim().split("-");
+  if (parts.length !== 3) return null;
+  var y = parseInt(parts[0], 10);
+  var m = parseInt(parts[1], 10);
+  var d = parseInt(parts[2], 10);
+  if (!y || !m || !d) return null;
+  return new Date(Date.UTC(y, m - 1, d)); // UTC avoids local TZ shifts
+  }
+
+
+  // Flatten all rows (with optional drop)
   var finalRows = [];
   results.forEach(function (block) {
     block.rows.forEach(function (row) {
+      // Optionally drop rows by Training Infer NaNs
+      if (dropTrainInferValue && trainInferIdx !== undefined) {
+        var v = row[trainInferIdx];
+        if ((v || "").trim() === dropTrainInferValue) return; // skip
+      }
+
       var out = [];
       out.push(block.modelName);
       out.push(block.seasonality);
@@ -251,15 +352,32 @@ function renderConcatenatedTableHTML(basin, results, headerRaw) {
     });
   });
 
-  // Title date = today
-  var today = new Date();
-  var formattedDate = today.toLocaleDateString("en-US", {
-    year: "numeric",
-    month: "long",
-    day: "numeric",
-  });
+  // Determine the latest prediction date appearing in the table (based on CSV "Date" column)
+var dateIdx = headerIndexMap["Date"]; // this is the original CSV column index
+var latestDt = null;
 
-  // Table-only HTML
+results.forEach(function (block) {
+  block.rows.forEach(function (row) {
+    // Respect the same drop filter applied above
+    if (dropTrainInferValue && trainInferIdx !== undefined) {
+      var v = row[trainInferIdx];
+      if ((v || "").trim() === dropTrainInferValue) return;
+    }
+
+    var dt = parseYYYYMMDD(row[dateIdx]);
+    if (!dt) return;
+    if (!latestDt || dt.getTime() > latestDt.getTime()) latestDt = dt;
+  });
+});
+
+var formattedDate = latestDt
+  ? latestDt.toLocaleDateString("en-US", { year: "numeric", month: "long", day: "numeric", timeZone: "UTC" })
+  : new Date().toLocaleDateString("en-US", { year: "numeric", month: "long", day: "numeric" });
+
+
+  var pngRel = basin + "_timeseries_plot.png";
+  var hasPng = !!pngAbsPathOrNull;
+
   var html = [
     "<!DOCTYPE html>",
     '<html lang="en">',
@@ -268,21 +386,33 @@ function renderConcatenatedTableHTML(basin, results, headerRaw) {
     '  <meta name="viewport" content="width=device-width, initial-scale=1.0">',
     "  <title>" + basin + " SWE Prediction</title>",
     "  <style>",
+    "    body { font-family: Arial, sans-serif; }",
     "    table { border-collapse: collapse; margin-top: 20px; }",
     "    th, td { border: 1px solid #ddd; padding: 8px; text-align: center; }",
     "    th { background-color: #f4f4f4; }",
     "    tr:nth-child(even) { background-color: #f9f9f9; }",
     "    tr:hover { background-color: #f1f1f1; }",
-    "    .layout { display: flex; justify-content: center; align-items: flex-start; gap: 10px; }",
+    "    .layout { display: flex; flex-direction: column; align-items: center; gap: 18px; }",
+    "    .timeseries { width: 100%; max-width: 1100px; text-align: center; }",
+    "    .timeseries img { width: 100%; height: auto; border: 1px solid #ddd; }",
+    "    .missing { color: #a00; font-style: italic; }",
     "  </style>",
     "</head>",
     "<body>",
-    '  <h1 style="text-align: center;">' + basin + " Predictions on " + formattedDate + "</h1>",
+    '  <h1 style="text-align: center;">' +
+      basin +
+      " Predictions on " +
+      formattedDate +
+      "</h1>",
     '  <div class="layout">',
     "    <table>",
     "      <thead>",
     "        <tr>" +
-      finalHeaders.map(function (h) { return "<th>" + h + "</th>"; }).join("") +
+      finalHeaders
+        .map(function (h) {
+          return "<th>" + h + "</th>";
+        })
+        .join("") +
       "</tr>",
     "      </thead>",
     "      <tbody>",
@@ -291,8 +421,8 @@ function renderConcatenatedTableHTML(basin, results, headerRaw) {
   for (var r = 0; r < finalRows.length; r++) {
     html.push("        <tr>");
     for (var c2 = 0; c2 < finalHeaders.length; c2++) {
-      var v = finalRows[r][c2] !== undefined ? finalRows[r][c2] : "";
-      html.push("          <td>" + v + "</td>");
+      var v2 = finalRows[r][c2] !== undefined ? finalRows[r][c2] : "";
+      html.push("          <td>" + v2 + "</td>");
     }
     html.push("        </tr>");
   }
@@ -300,6 +430,14 @@ function renderConcatenatedTableHTML(basin, results, headerRaw) {
   html.push(
     "      </tbody>",
     "    </table>",
+    '    <div class="timeseries">',
+    '      <h2 style="margin: 0 0 10px 0;">Timeseries</h2>',
+    hasPng
+      ? '      <img src="' + pngRel + '" alt="' + basin + ' timeseries plot" />'
+      : '      <div class="missing">Timeseries PNG not found: expected ' +
+          pngRel +
+          "</div>",
+    "    </div>",
     "  </div>",
     "</body>",
     "</html>"
@@ -309,21 +447,59 @@ function renderConcatenatedTableHTML(basin, results, headerRaw) {
 }
 
 // --------------------------
-// Run for each basin -> write <BASIN>.html
+// Run for each basin -> write <BASIN>.html into script directory
+// Ensure PNG is alongside HTML (copy if found elsewhere)
 // --------------------------
 basins.forEach(function (basin) {
   var basinRoot = path.join(ROOT, basin);
 
-  buildHTMLForBasin(basin, basinRoot, function (err, html) {
+  buildHTMLForBasin(basin, basinRoot, function (err, out) {
     if (err) {
       console.error("[" + basin + "] ERROR:", err.message || err);
       return;
     }
 
-    var outPath = basin + ".html";
+    var html = out.html;
+    var pngAbsPath = out.pngAbsPath;
+
+    var outPath = path.join(OUT_DIR, basin + ".html");
     fs.writeFile(outPath, html, function (err2) {
-      if (err2) console.error("[" + basin + "] Error writing HTML:", err2);
-      else console.log("[" + basin + "] Wrote " + outPath);
+      if (err2) {
+        console.error("[" + basin + "] Error writing HTML:", err2);
+        return;
+      }
+
+      // Ensure PNG exists next to HTML
+      var pngName = basin + "_timeseries_plot.png";
+      var dstPng = path.join(OUT_DIR, pngName);
+
+      fs.stat(dstPng, function (eStat, st) {
+        if (!eStat && st && st.isFile()) {
+          console.log("[" + basin + "] Wrote " + outPath + " (PNG already present)");
+          return;
+        }
+
+        if (pngAbsPath) {
+          fs.copyFile(pngAbsPath, dstPng, function (err3) {
+            if (err3) {
+              console.warn(
+                "[" +
+                  basin +
+                  "] Wrote " +
+                  outPath +
+                  " (PNG copy failed: " +
+                  (err3.message || err3) +
+                  ")"
+              );
+            } else {
+              console.log("[" + basin + "] Wrote " + outPath + " + " + dstPng);
+            }
+          });
+        } else {
+          console.log("[" + basin + "] Wrote " + outPath + " (no PNG found)");
+        }
+      });
     });
   });
 });
+

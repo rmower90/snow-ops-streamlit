@@ -5,42 +5,30 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>USCASJ SWE Prediction</title>
   <style>
+    body { font-family: Arial, sans-serif; }
     table { border-collapse: collapse; margin-top: 20px; }
     th, td { border: 1px solid #ddd; padding: 8px; text-align: center; }
     th { background-color: #f4f4f4; }
     tr:nth-child(even) { background-color: #f9f9f9; }
     tr:hover { background-color: #f1f1f1; }
-    .layout { display: flex; justify-content: center; align-items: flex-start; gap: 10px; }
+    .layout { display: flex; flex-direction: column; align-items: center; gap: 18px; }
+    .timeseries { width: 100%; max-width: 1100px; text-align: center; }
+    .timeseries img { width: 100%; height: auto; border: 1px solid #ddd; }
+    .missing { color: #a00; font-style: italic; }
   </style>
 </head>
 <body>
-  <h1 style="text-align: center;">USCASJ Predictions on January 12, 2026</h1>
+  <h1 style="text-align: center;">USCASJ Predictions on January 9, 2026</h1>
   <div class="layout">
     <table>
       <thead>
-        <tr><th>Model Name</th><th>Seasonality</th><th>Date</th><th>Training Infer NaNs</th><th><7k</th><th>7k-8k</th><th>8k-9k</th><th>9k-10k</th><th>10k-11k</th><th>11k-12k</th><th>>12k</th><th>Band Sum</th><th>Basin</th></tr>
+        <tr><th>Model Name</th><th>Seasonality</th><th>Date</th><th><7k</th><th>7k-8k</th><th>8k-9k</th><th>9k-10k</th><th>10k-11k</th><th>11k-12k</th><th>>12k</th><th>Band Sum</th><th>Basin</th></tr>
       </thead>
       <tbody>
         <tr>
           <td>COMMON_MASK</td>
           <td>season</td>
           <td>2026-01-09</td>
-          <td>drop NaNs</td>
-          <td>14</td>
-          <td>57</td>
-          <td>123</td>
-          <td>130</td>
-          <td>120</td>
-          <td>106</td>
-          <td>18</td>
-          <td>571</td>
-          <td>400</td>
-        </tr>
-        <tr>
-          <td>COMMON_MASK</td>
-          <td>season</td>
-          <td>2026-01-09</td>
-          <td>predict NaNs</td>
           <td>0</td>
           <td>44</td>
           <td>115</td>
@@ -55,22 +43,6 @@
           <td>COMMON_MASK</td>
           <td>accum</td>
           <td>2026-01-09</td>
-          <td>drop NaNs</td>
-          <td>0</td>
-          <td>0</td>
-          <td>34</td>
-          <td>150</td>
-          <td>98</td>
-          <td>72</td>
-          <td>11</td>
-          <td>366</td>
-          <td>378</td>
-        </tr>
-        <tr>
-          <td>COMMON_MASK</td>
-          <td>accum</td>
-          <td>2026-01-09</td>
-          <td>predict NaNs</td>
           <td>0</td>
           <td>5</td>
           <td>29</td>
@@ -85,22 +57,6 @@
           <td>COMMON_MASK</td>
           <td>melt</td>
           <td>2026-01-09</td>
-          <td>drop NaNs</td>
-          <td>12</td>
-          <td>47</td>
-          <td>98</td>
-          <td>207</td>
-          <td>0</td>
-          <td>0</td>
-          <td>37</td>
-          <td>402</td>
-          <td>1746</td>
-        </tr>
-        <tr>
-          <td>COMMON_MASK</td>
-          <td>melt</td>
-          <td>2026-01-09</td>
-          <td>predict NaNs</td>
           <td>6</td>
           <td>54</td>
           <td>104</td>
@@ -113,6 +69,10 @@
         </tr>
       </tbody>
     </table>
+    <div class="timeseries">
+      <h2 style="margin: 0 0 10px 0;">Timeseries</h2>
+      <img src="USCASJ_timeseries_plot.png" alt="USCASJ timeseries plot" />
+    </div>
   </div>
 </body>
 </html>
