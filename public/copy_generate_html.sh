@@ -11,6 +11,7 @@ declare -a BASINS=("USCASJ")
 model_output_dir="/home/rossamower/work/aso/data/"
 streamlit_output_dir="/home/rossamower/work/aso/snow-ops-streamlit/data/basins/"
 current_dir=$(pwd)
+script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 for basin in "${BASINS[@]}"; do
     # uaswe file paths.
@@ -86,7 +87,9 @@ for basin in "${BASINS[@]}"; do
     # create html file.
     echo ""
     echo "Generating html files for basin: ${basin}"
-    node generateHTMLPred.js $basin --dropTrainInfer="drop NaNs"
+    # node generateHTMLPred.js $basin --dropTrainInfer="drop NaNs"
+    node "${script_dir}/generateHTMLPred.js" "$basin" --dropTrainInfer="drop NaNs"
+
 
     
     
