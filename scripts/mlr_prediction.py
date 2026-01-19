@@ -183,10 +183,23 @@ if __name__ =="__main__":
     isSplit = bool(int(sys.argv[3]))
     isAccum = bool(int(sys.argv[4]))
     showOutput = bool(int(sys.argv[5]))
+    pillowImputation_ = bool(int(sys.argv[6]))
     # default settings.
     model_num,isMean,isCombination,prediction_mm_df,prediction_acreFt_df,prediction_pillow_df,user_qa_level,elev_band, QA_flag = get_default_settings()
 
-
+    # model types
+    if isSplit:
+        if isAccum:
+            seasonal_dir = 'accum'
+        else:
+            seasonal_dir = 'melt'
+    else:
+        seasonal_dir = 'season'
+    
+    if pillowImputation_:
+        aso_stack_type = 'COMMON_MASK'
+    else:
+        aso_stack_type = 'SNOWMODEL_IMPUTE'
     """
         LOAD DATA -----------------------------------------------
     """
@@ -235,6 +248,7 @@ if __name__ =="__main__":
     year_str, month_str, day_str, wy_str = timing_vars(obs_data_test_ds)
 
     print(f'RUNNING MLR PREDICTION: {aso_site_name}; up to {str(obs_data_test_ds.time.values[-1])[0:10]}')
+    print(f'Model Type: {seasonal_dir}; Pillow Imputation: {aso_stack_type}')
     print('')
 
     """
@@ -301,6 +315,7 @@ if __name__ =="__main__":
                                                                    obs_data_test_lst_raw,
                                                                    obs_data_test_lst,
                                                                    baseline_pils,
+                                                                   exclude_pillows,
                                                                    printOutput = showOutput,
                                                                               )
 
@@ -309,7 +324,9 @@ if __name__ =="__main__":
                                                     aso_site_name,all_pils,all_pils_QA,df_sum_total,baseline_pils_,start_wy,end_wy,isSplit,isAccum,
                                                     mlrPred_dir,current_date,dem_bin.dem_bin,elev_bin_labels,QA_flag=QA_flag,
                                                     modelNUM = model_num,isMean = False,saveModels = False,showOutput = showOutput,
-                                                    saveValidation = False,pickledir = None,add_zeroASO = True,isCombination_ = isCombination)
+                                                    saveValidation = False,pickledir = None,add_zeroASO = True,isCombination_ = isCombination,
+                                                    pillowImputation_ = pillowImputation_,ds_snowmodel_ = sm_train_ds,
+                                                    )
 
             prediction_mm_df,prediction_acreFt_df,prediction_pillow_df = postprocessing.arrange_prediction_tables(df_sheet_lst_mm,
                                                                                                           df_sheet_lst_acreFt,
@@ -341,15 +358,7 @@ if __name__ =="__main__":
         OUTPUT
     """
 
-    if isSplit:
-        if isAccum:
-            seasonal_dir = 'accum'
-        else:
-            seasonal_dir = 'melt'
-    else:
-        seasonal_dir = 'season'
-    
-    aso_stack_type = 'COMMON_MASK'
+
 
     dir_path = f'{mlrPred_dir}/{aso_stack_type}/'
     if not os.path.exists(dir_path): os.makedirs(dir_path)

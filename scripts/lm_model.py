@@ -35,6 +35,7 @@ import sklearn.metrics as metrics
 import pandas as pd
 import matplotlib.cm as cm
 import matplotlib.colors as mcolors
+from datetime import datetime
 warnings.filterwarnings("ignore")
 from itertools import combinations
 
@@ -42,7 +43,8 @@ from itertools import combinations
 def run_all_mlr_models(aso_tseries_1,obs_data_hist,current_vals_df,aso_site_name,all_pils,all_pils_QA,df_sum_total,baseline_pils,start_wy,
                        end_wy,isSplit,isAccum,prediction_dir,prediction_date,dem_bin,labels_from_yaml,QA_flag = 'NA',
                        modelNUM = None,isMean = False,saveModels = True,showOutput = False,
-                       saveValidation = False,pickledir = None,add_zeroASO = True,isCombination_ = False):
+                       saveValidation = False,pickledir = None,add_zeroASO = True,isCombination_ = False,
+                       pillowImputation_ = True,ds_snowmodel_ = None):
     """
     Slice data based on accumulation / melt threshold for each year.
     Input:
@@ -118,7 +120,7 @@ def run_all_mlr_models(aso_tseries_1,obs_data_hist,current_vals_df,aso_site_name
                                                                 baseline_pils,start_wy,end_wy,aso_site_name,isSplit,isAccum,isImpute,
                                                                 isMean,prediction_date,modelID, QA_flag,model_type = 'MLR',
                                                                 showOutput = showOutput,isCombination = isCombination_,
-                                                                saveValidation = saveValidation)
+                                                                saveValidation = saveValidation,pillowImputation = pillowImputation_,ds_model= ds_snowmodel_)
             
             # pull selected pillows.
             selected_pils = summary_dict_model[modelID]['model_features']['features']
@@ -206,10 +208,12 @@ def process_melt_accum_thresh(thresh_fpath,df_sum_total,elev_bin,isAccum):
         df_melt = df_merge[df_merge['time'] >= df_merge['threshold_best']].reset_index().drop(columns = ['water_year','threshold_best','index'])
         return df_melt
 
+
+
 def run_mlr_train_predict(aso_tseries_1,obs_data_hist,elev_band,all_pils,all_pils_QA,df_sum_total,baseline_pils,start_wy,end_wy,
                          aso_site_name,isSplit,isAccum,isImpute,isMean,prediction_date,
                          modelID,QA_flag,model_type = 'MLR',showOutput = False,isCombination = False,
-                         saveValidation = False):
+                         saveValidation = False,pillowImputation = True,ds_model = None):
     """
     Run single multiple linear regression cross validation and output results in dictionary.
     Input:
@@ -250,7 +254,12 @@ def run_mlr_train_predict(aso_tseries_1,obs_data_hist,elev_band,all_pils,all_pil
             if isMean:
                 obs_data_5_,pils_removed,df_summary_impute = impute_pillow_mean(df_sum_total,all_pils_QA,obs_data_hist,obs_threshold = 0.50)
             else:
-                obs_data_5_,pils_removed,df_summary_impute = impute_pillow_prediction(df_sum_total,all_pils_QA,obs_data_hist,aso_site_name,prediction_date,obs_threshold = 0.50)
+                if pillowImputation:
+                    obs_data_5_,pils_removed,df_summary_impute = impute_pillow_prediction(df_sum_total,all_pils_QA,obs_data_hist,aso_site_name,prediction_date,obs_threshold = 0.50)
+                else:
+                    obs_data_5_,pils_removed,df_summary_impute = impute_model_prediction(df_sum_total,all_pils_QA,obs_data_hist,
+                                                                                         aso_site_name,prediction_date,
+                                                                                         obs_threshold = 0.50, ds_swed = ds_model)
 
             ## split up data into accumlation and melt.
             # df_split = process_melt_accum_thresh(f'./data/summary_table/{aso_site_name}/1000_ft/melt_threshold.csv',
@@ -258,8 +267,10 @@ def run_mlr_train_predict(aso_tseries_1,obs_data_hist,elev_band,all_pils,all_pil
                                                            df_summary_impute,
                                                            elev_band,
                                                            isAccum)
-            predictions_bestfit, predictions_validation, stations2, aso_tseries_2, obs_data_6 = run_cross_val_selection(obs_data_5_,df_split,aso_tseries_1,pils_removed,start_wy,end_wy,
-                                                                                                                         elev_band,isCombination = isCombination,showOutput = showOutput,isMelt = isSplit)
+            # predictions_bestfit, predictions_validation, stations2, aso_tseries_2, obs_data_6 = run_cross_val_selection(obs_data_5_,df_split,aso_tseries_1,pils_removed,start_wy,end_wy,
+            #                                                                                                              elev_band,isCombination = isCombination,showOutput = showOutput,isMelt = isSplit)
+            predictions_allpils, aso_vals, predictions_validation1, predictions_validation2,predictions_bestfit, stations2, aso_tseries_2, obs_data_6 = run_cross_val_selection2(obs_data_5_,df_split,aso_tseries_1,baseline_pils,start_wy,end_wy,
+                                                                                                                     elev_band,isCombination = isCombination,showOutput = showOutput,isMelt = isSplit)
         else:
             ## split up data into accumlation and melt.
             # df_split = process_melt_accum_thresh(f'./data/summary_table/{aso_site_name}/1000_ft/melt_threshold.csv',
@@ -268,21 +279,36 @@ def run_mlr_train_predict(aso_tseries_1,obs_data_hist,elev_band,all_pils,all_pil
                                                            elev_band,
                                                            isAccum)
             # return df_split,obs_data_hist,aso_tseries_1,baseline_pils
-            predictions_bestfit, predictions_validation, stations2, aso_tseries_2, obs_data_6 = run_cross_val_selection(obs_data_hist,df_split,aso_tseries_1,baseline_pils,start_wy,end_wy,
-                                                                                                                         elev_band,isCombination = isCombination,showOutput = showOutput,isMelt = isSplit)
+            # predictions_bestfit, predictions_validation, stations2, aso_tseries_2, obs_data_6 = run_cross_val_selection(obs_data_hist,df_split,aso_tseries_1,baseline_pils,start_wy,end_wy,
+            #                                                                                                              elev_band,isCombination = isCombination,showOutput = showOutput,isMelt = isSplit)
+            predictions_allpils, aso_vals, predictions_validation1, predictions_validation2,predictions_bestfit, stations2, aso_tseries_2, obs_data_6 = run_cross_val_selection2(obs_data_hist,df_split,aso_tseries_1,baseline_pils,start_wy,end_wy,
+                                                                                                                     elev_band,isCombination = isCombination,showOutput = showOutput,isMelt = isSplit)
     else:
         if isImpute:
             ## update missing observations with average from flight date.
             if isMean:
                 obs_data_5_,pils_removed,df_summary_impute = impute_pillow_mean(df_sum_total,all_pils_QA,obs_data_hist,obs_threshold = 0.50)
             else:
-                obs_data_5_,pils_removed,df_summary_impute = impute_pillow_prediction(df_sum_total,all_pils_QA,obs_data_hist,aso_site_name,prediction_date,obs_threshold = 0.50)
+                if pillowImputation:
+                    obs_data_5_,pils_removed,df_summary_impute = impute_pillow_prediction(df_sum_total,all_pils_QA,obs_data_hist,aso_site_name,prediction_date,obs_threshold = 0.50)
+                else:
+                    obs_data_5_,pils_removed,df_summary_impute = impute_model_prediction(df_sum_total,all_pils_QA,obs_data_hist,
+                                                                                         aso_site_name,prediction_date,
+                                                                                         obs_threshold = 0.50, ds_swed = ds_model)
 
-            predictions_bestfit, predictions_validation, stations2, aso_tseries_2, obs_data_6 = run_cross_val_selection(obs_data_5_,df_summary_impute,aso_tseries_1,pils_removed,start_wy,end_wy,
-                                                                                                                         elev_band,isCombination = isCombination,showOutput = showOutput,isMelt = isSplit)
+            # predictions_bestfit, predictions_validation, stations2, aso_tseries_2, obs_data_6 = run_cross_val_selection(obs_data_5_,df_summary_impute,aso_tseries_1,pils_removed,start_wy,end_wy,
+            #                                                                                                              elev_band,isCombination = isCombination,showOutput = showOutput,isMelt = isSplit)
+            print('here')
+            predictions_allpils, aso_vals, predictions_validation1, predictions_validation2,predictions_bestfit, stations2, aso_tseries_2, obs_data_6 = run_cross_val_selection2(obs_data_5_,df_summary_impute,aso_tseries_1,pils_removed,start_wy,end_wy,
+                                                                                                                     elev_band,isCombination = isCombination,showOutput = showOutput,isMelt = isSplit)
+            print('here')
+            print(aso_vals.shape)
+            print(aso_tseries_2.shape)
         else:
-            predictions_bestfit, predictions_validation, stations2, aso_tseries_2, obs_data_6 = run_cross_val_selection(obs_data_hist,df_sum_total,aso_tseries_1,baseline_pils,start_wy,end_wy,
-                                                                                                                         elev_band,isCombination = isCombination,showOutput = showOutput,isMelt = isSplit)
+            # predictions_bestfit, predictions_validation, stations2, aso_tseries_2, obs_data_6 = run_cross_val_selection(obs_data_hist,df_sum_total,aso_tseries_1,baseline_pils,start_wy,end_wy, 
+            #                                                                                                              elev_band,isCombination = isCombination,showOutput = showOutput,isMelt = isSplit)
+            predictions_allpils, aso_vals, predictions_validation1, predictions_validation2,predictions_bestfit, stations2, aso_tseries_2, obs_data_6 = run_cross_val_selection2(obs_data_hist,df_sum_total,aso_tseries_1,baseline_pils,start_wy,end_wy,
+                                                                                                                     elev_band,isCombination = isCombination,showOutput = showOutput,isMelt = isSplit)
 
     if saveValidation:
         # fig = plt.figure(figsize=(10, 13))
@@ -310,14 +336,14 @@ def run_mlr_train_predict(aso_tseries_1,obs_data_hist,elev_band,all_pils,all_pil
         # predictions_v_observations_tseries(aso_tseries_2[:,elev_band],predictions_validation,obs_data_6,
         #                                stations2,start_wy,end_wy,ax2,max_swe = 1500)
         predictions_v_observations(aso_tseries_2[:,elev_band],
-                                   predictions_bestfit,
-                                   predictions_validation,
+                                   predictions_allpils,
+                                   predictions_validation2,
                                    aso_site_name,
                                    features = None,
                                    showPlot = True)
 
         predictions_v_observations_tseries(aso_tseries_2[:,elev_band],
-                                           predictions_validation,
+                                           predictions_validation2,
                                            obs_data_6,
                                            stations2,
                                            start_wy,
@@ -327,12 +353,12 @@ def run_mlr_train_predict(aso_tseries_1,obs_data_hist,elev_band,all_pils,all_pil
 
     ## plot residuals.
     if saveValidation:
-        max_resid_absolute,max_resid_percent = residual_comparison(aso_tseries_2[:,elev_band],predictions_validation,None,None,None,
+        max_resid_absolute,max_resid_percent = residual_comparison(aso_tseries_2[:,elev_band],predictions_validation2,None,None,None,
                                                                mask_val = 50,showPlot = False)
         # max_resid_absolute,max_resid_percent = residual_comparison(aso_tseries_2[:,elev_band],predictions_validation,ax4,ax5,plt,
         #                                                        mask_val = 50,showPlot = True)
     else:
-        max_resid_absolute,max_resid_percent = residual_comparison(aso_tseries_2[:,elev_band],predictions_validation,None,None,None,
+        max_resid_absolute,max_resid_percent = residual_comparison(aso_tseries_2[:,elev_band],predictions_validation2,None,None,None,
                                                                mask_val = 50,showPlot = False)
     
 
@@ -374,9 +400,9 @@ def run_mlr_train_predict(aso_tseries_1,obs_data_hist,elev_band,all_pils,all_pil
 
     selected_pils = [obs_data_6[i].name for i in range(0,len(obs_data_6)) if i in stations2]
 
-    rmse_mm = metrics.root_mean_squared_error(aso_tseries_2[:,elev_band].values ,predictions_validation)
+    rmse_mm = metrics.root_mean_squared_error(aso_tseries_2[:,elev_band].values ,predictions_validation2)
 
-    summary_dict = regression_results(aso_tseries_2[:,elev_band].values * 0.0393701, predictions_validation * 0.0393701,
+    summary_dict = regression_results(aso_tseries_2[:,elev_band].values * 0.0393701, predictions_validation2 * 0.0393701,
                                       max_resid_absolute * 0.0393701,max_resid_percent,rmse_mm,selected_pils,prediction_date,
                                       modelID,isAccum,isImpute,isMean,title_str,model_type,QA_flag)
 
@@ -550,6 +576,82 @@ def run_cross_val_selection(obs_data,df_sum_total,aso_tseries,all_pillows,start_
     # print(f'Best fit station correlation: {np.corrcoef(predictions_validation,summary_data_total[-1])[0,1]**3:.3f}')
     # return predictions_bestfit, predictions_validation, stations2, aso_tseries_2, obs_data_6
     return predictions_bestfit, predictions_validation, stations2, aso_tseries_2, obs_data_6
+
+def run_cross_val_selection2(obs_data,df_sum_total,aso_tseries,all_pillows,start_wy,end_wy,
+                            elev_band = -1,isCombination = True,showOutput = True,isMelt = False):
+    """
+        Runs cross-validation approach of linear regression based on year used 
+        to run testing.
+        Input:
+            obs_data - list of xarray pillow observations.
+            df_sum_total - pandas dataframe for observations, features, and labels WITH nans.
+            aso_tseries_1 - xarray object for aso mean swe based on elevation.
+            all_pillows - list of pillows to use.
+            start_wy - integer for start water year.
+            end_wy - integer for end water year.
+            elev_band - elevation band to run model (note: -1 is entire domain)
+            isCombination - boolean to determine which approach to use.
+            isMelt - boolean to indicate additional threshold of dates for melt and accum.
+            showOutput - boolean to indicate show output.
+        Output:
+            preds - list of predictions for each cross-validated year.
+    """
+    ## slice observation data ##
+    obs_data_6 = [obs_data[i] for i in range(0,len(obs_data)) if obs_data[i].name in all_pillows]
+
+    ## slice for melt or accum ##
+    if isMelt:
+        print('slicing for melt')
+        aso_tseries = aso_tseries[aso_tseries.date.isin(df_sum_total.time.values)]
+
+    ## identify missing times ##
+    missing_times = df_sum_total[df_sum_total[all_pillows].isnull().sum(axis=1) > 0].time.values
+    print('all pillows',all_pillows)
+    print('missing times',missing_times)
+
+    ## slice aso mean swe ##
+    aso_tseries_2 = aso_tseries[~aso_tseries.date.isin(missing_times)]
+
+    ## run summary ##
+    summary_data_total = summarize_data(obs_data_6, aso_tseries_2[:,elev_band])
+
+    predictions_allPils = summarize(summary_data_total,plotFig = showOutput,saveFig = False, axis_max = 1600)
+    
+    if showOutput:
+        print(f'All features correlation: {np.corrcoef(predictions_allPils, summary_data_total[-1])[0,1]**2:.3f}')
+        print(f'')
+        print('Running Cross Validation #1')
+    ## run station selection based on cross-validation
+    predictions_validation1,best_stations = cross_val_loyo_pred_select(aso_tseries_2[:,elev_band], summary_data_total[:-1,:],
+                                                                      start_wy,end_wy,showOutput = showOutput)
+    predictions_validation1 = np.array(predictions_validation1)
+    predictions_validation1[predictions_validation1<0]=0
+    
+    if showOutput:
+        print('')
+        print(f'Validation station correlation: {np.corrcoef(predictions_validation1,summary_data_total[-1])[0,1]**2:.3f}')
+        print('Select best stations')
+    
+    # select best stations.
+    stations2 = identify_best_stations(best_stations,aso_tseries_2,elev_band,summary_data_total,isCombination,showOutput = showOutput)
+
+    if showOutput:
+        print('Running Cross Validation #2')
+
+    ## run station selection based on cross-validation
+    predictions_validation2,best_stations2 = cross_val_loyo_pred_select(aso_tseries_2[:,elev_band], summary_data_total[stations2,:],
+                                                                      start_wy,end_wy,showOutput = showOutput)
+    predictions_validation2 = np.array(predictions_validation2)
+    predictions_validation2[predictions_validation2<0]=0
+    
+    
+    predictions_bestfit = cross_val_loo(aso_tseries_2[:,elev_band], summary_data_total[stations2,:])
+    predictions_bestfit = np.array(predictions_bestfit)
+    predictions_bestfit[predictions_bestfit<0]=0
+
+    # print(f'Best fit station correlation: {np.corrcoef(predictions_validation,summary_data_total[-1])[0,1]**3:.3f}')
+    # return predictions_bestfit, predictions_validation, stations2, aso_tseries_2, obs_data_6
+    return predictions_allPils, summary_data_total[-1], predictions_validation1, predictions_validation2, predictions_bestfit, stations2, aso_tseries_2, obs_data_6
 
 def summarize_data(pillow_data, aso_tseries):
     """
@@ -1086,6 +1188,205 @@ def impute_pillow_prediction(df_sum_total,
             else:
                 obs_data_5_[pil_idx].loc[dict(time=time)] = val
     return obs_data_5_,list(pils_removed),df_summary_impute
+
+def impute_model_prediction(
+    df_sum_total: pd.DataFrame,
+    all_pils: list,
+    obs_data_5: list,
+    aso_site_name: str,
+    prediction_date: datetime,
+    # water_year: int,
+    # impute_dir: str,
+    obs_threshold: float = 0.50,
+    ds_swed: "xr.Dataset" = None,         # expects swed_best/swed_second/swed_third with dims (time, pil)
+    saveImputeCSV: bool = True,
+    train_start_year: int = 2013,
+    predictor_vars=("swed_best", "swed_second", "swed_third"),
+):
+    """
+    Fit a linear regression model per pillow:
+        target = pillow SWE obs
+        predictors = 3 SnowModel grid cell SWE series (best/second/third) for that pillow
+
+    Input:
+        df_sum_total  - summary pandas dataframe with features and labels.
+                        Must contain columns for pillows in all_pils and at least 'time' and 'aso_mean_bins_mm'.
+        all_pils      - list of pillow ids.
+        obs_data_5    - list of xarray DataArrays for pillow observations (each .name is a pillow id).
+        ds_swed       - xarray Dataset with SnowModel SWE series at 3 grid cells per pillow:
+                        variables: swed_best/swed_second/swed_third
+                        dims: (time, pil)
+        obs_threshold - fraction missing threshold for pillow removal.
+        aso_site_name - python string of aso_site_name. (kept for symmetry)
+        water_year    - int water year
+        impute_dir    - output directory
+        saveImputeCSV - whether to write/read cached imputation CSV
+
+    Output:
+        obs_data_5_        - new list of xarray datarrays for pillow observations with filled values.
+        pils_removed(list) - pillows retained for imputation (same semantics as your original)
+        df_summary_impute  - updated summary table with imputed values
+    """
+
+    # --- 1) Identify pillows with enough observations to attempt imputation ---
+    drop_bool = (
+        (df_sum_total[all_pils].isnull().sum(axis=0) / len(df_sum_total)) < obs_threshold
+    ).values
+    pils_removed = np.array(all_pils)[drop_bool].tolist()
+
+    # Subset summary table to only pillows retained
+    df_dropped_pils = df_sum_total[pils_removed].copy()
+
+    # Output CSV path
+    if prediction_date.month >= 10:
+        impute_df_fpath = f'/home/rossamower/work/aso/data/mlr_prediction/{aso_site_name}/imputation/pillow_impute_threeSnowModelGrids_wy{prediction_date.year+1}.csv'
+    else:
+        impute_df_fpath = f'/home/rossamower/work/aso/data/mlr_prediction/{aso_site_name}/imputation/pillow_impute_threeSnowModelGrids_wy{prediction_date.year}.csv'
+
+    # --- 2) Build imputation table (or load it) ---
+    need_build = (not os.path.exists(impute_df_fpath)) or (saveImputeCSV is False)
+
+    if need_build:
+        # Ensure ds has required predictors
+        missing_vars = [v for v in predictor_vars if v not in ds_swed.data_vars]
+        if missing_vars:
+            raise ValueError(
+                f"ds_swed is missing required variables: {missing_vars}. "
+                f"Expected at least {predictor_vars}."
+            )
+
+        # Make sure ds_swed has the expected coords
+        if "pil" not in ds_swed.coords or "time" not in ds_swed.coords:
+            raise ValueError("ds_swed must have coords: 'pil' and 'time'.")
+
+        # We'll impute each pil independently with its own 3-grid predictors
+        for pil in pils_removed:
+            # Skip if pillow not present in ds_swed
+            if pil not in set(ds_swed["pil"].values.astype(str)):
+                continue
+
+            # Target pillow obs series (from obs_data_5 list)
+            try:
+                target_id = [i for i in range(len(obs_data_5)) if obs_data_5[i].name == pil][0]
+            except IndexError:
+                # pillow is in df_sum_total but not in obs_data_5 list
+                continue
+
+            target_da = obs_data_5[target_id]
+
+            # Build training dataframe: merge target with predictors on time
+            # target_da.to_dataframe() -> column name is pil (because DataArray.name == pil)
+            df_target = target_da.to_dataframe().reset_index()  # columns: ['time', pil]
+            df_pred = (
+                ds_swed.sel(pil=pil)[list(predictor_vars)]
+                .to_dataframe()
+                .reset_index()
+            )  # columns: ['time', 'pil', swed_best, swed_second, swed_third]
+            # Keep only time + predictors
+            keep_cols = ["time"] + list(predictor_vars)
+            df_pred = df_pred[keep_cols]
+
+            df_train = pd.merge(df_target, df_pred, on="time", how="inner")
+
+            # Training subset and drop NA
+            df_train = df_train[df_train["time"].dt.year >= train_start_year].dropna(axis=0)
+
+            # If not enough data, skip
+            if len(df_train) < 20:
+                continue
+
+            X = df_train[list(predictor_vars)].values
+            y = df_train[pil].values
+
+            # Fit linear regression
+            lm = linear_model.LinearRegression()
+            lm.fit(X, y)
+
+            # Indices where df_dropped_pils is missing for this pillow
+            miss_mask = df_dropped_pils[pil].isna()
+            if not miss_mask.any():
+                continue
+
+            # Predictor values at those times
+            times_missing = df_sum_total.loc[miss_mask, "time"].values
+            df_pred_missing = (
+                ds_swed.sel(pil=pil)
+                .sel(time=times_missing)
+                [list(predictor_vars)]
+                .to_dataframe()
+                .reset_index()
+            )
+            # Align by time back to the row order in df_sum_total[miss_mask]
+            df_pred_missing = df_pred_missing.set_index("time").reindex(pd.to_datetime(times_missing))
+
+            # Only predict where predictors are all present
+            ok = ~df_pred_missing[list(predictor_vars)].isna().any(axis=1)
+            if not ok.any():
+                continue
+
+            Xmiss = df_pred_missing.loc[ok, list(predictor_vars)].values
+            pred = lm.predict(Xmiss)
+            pred = np.clip(pred, 0, None)  # no negatives
+
+            # Fill into df_dropped_pils using integer positions of missing rows
+            # miss_mask is aligned to df_dropped_pils index (same as df_sum_total)
+            miss_idx = df_dropped_pils.index[miss_mask]
+            # ok is aligned to times_missing order; map ok True positions -> corresponding miss_idx
+            ok_idx = miss_idx[np.where(ok.values)[0]]
+
+            df_dropped_pils.loc[ok_idx, pil] = pred
+
+        # Final imputed summary dataframe with same shape pattern as your original
+        df_summary_impute = copy.deepcopy(df_dropped_pils)
+        pillows_ = df_dropped_pils.columns.to_list()
+
+        df_summary_impute["time"] = df_sum_total["time"].values
+        df_summary_impute["aso_mean_bins_mm"] = df_sum_total["aso_mean_bins_mm"].values
+        df_summary_impute = df_summary_impute[["time", "aso_mean_bins_mm"] + pillows_]
+
+        if saveImputeCSV:
+            df_summary_impute.to_csv(impute_df_fpath, index=False)
+
+    # --- 3) Load imputation table (cached or newly written) ---
+    if os.path.exists(impute_df_fpath):
+        df_summary_impute = pd.read_csv(impute_df_fpath)
+
+    df_summary_impute["time"] = pd.to_datetime(df_summary_impute["time"])
+    df_summary_impute = df_summary_impute.set_index("time")
+    df_summary_impute[df_summary_impute < 0] = 0.0
+    df_summary_impute = df_summary_impute.reset_index()
+
+    # --- 4) Fill obs_data_5 with imputed values (same behavior as your original) ---
+    obs_data_5_ = copy.deepcopy(obs_data_5)
+
+    for pil_id in pils_removed:
+        if pil_id not in df_summary_impute.columns:
+            continue
+
+        df_impute = df_summary_impute[["time", pil_id]]
+
+        # identify pillow index in obs_data_5_
+        matches = [i for i in range(len(obs_data_5_)) if obs_data_5_[i].name == pil_id]
+        if not matches:
+            continue
+        pil_idx = matches[0]
+
+        for _, row in df_impute.iterrows():
+            t = row["time"]
+            v = row[pil_id]
+
+            # only update if different (keeps your original semantics)
+            try:
+                current = obs_data_5_[pil_idx].sel(time=t).values
+                if np.asarray(current == v).item():
+                    continue
+            except Exception:
+                # if selection fails for any reason, just try to assign
+                pass
+
+            obs_data_5_[pil_idx].loc[dict(time=t)] = v
+
+    return obs_data_5_, list(pils_removed), df_summary_impute
 
 def regression_results(y_true, y_pred,max_resid_absolute,max_resid_percent,rmse_mm,features,date,
                       modelID,isAccum,isImpute,isMean,elev_band,model_type,QA_flag):

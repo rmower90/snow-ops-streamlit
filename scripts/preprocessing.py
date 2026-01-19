@@ -342,7 +342,9 @@ def process_daily_qa(
                      obs_data_raw: list,
                      obs_data_qa: list,
                      baseline_pils: list,
+                     pils_to_exclude: list = [],
                      printOutput: bool = False,
+                     isBestCase: bool = False,
                     ):
     """
     """ 
@@ -358,6 +360,15 @@ def process_daily_qa(
     nan_stations = [i.name for i in obs_data_qa_current_day if i.isnull()]
     # stations failing qa.
     qa_stations = [i for i in nan_stations if i not in missing_stations]
+    
+    # stations to exclude.
+    for i in pils_to_exclude:
+        if i not in qa_stations: qa_stations.append(i)
+        if i not in nan_stations: nan_stations.append(i)
+    # qa_stations = [i for i in qa_stations if i not in pils_to_exclude]
+    print('missing stations (NaNs):', missing_stations)
+    print('excluded stations (Manual QA/QC):', pils_to_exclude)
+    print('flagged stations (Automated QA/QC):', [i for i in qa_stations if i not in pils_to_exclude])
     # create raw dataframe.
     obs_data_raw_df = create_qa_tables(obs_data_raw,missing_stations = [],isQA=False)
     # create qa dataframe.
@@ -369,8 +380,12 @@ def process_daily_qa(
 
 
     # all_pils_QA
-    all_pils_QA = [i for i in all_pils if i not in nan_stations]    
-    baseline_pils_ = [i for i in baseline_pils if i not in nan_stations]
+    if isBestCase:
+        all_pils_QA = all_pils
+        baseline_pils_ = baseline_pils
+    else:
+        all_pils_QA = [i for i in all_pils if i not in nan_stations]    
+        baseline_pils_ = [i for i in baseline_pils if i not in nan_stations]
     
     return obs_day_raw_df,all_pils_QA,baseline_pils_,obs_day_qa_df
 
@@ -414,8 +429,6 @@ def imputation_w_snowmodel(
         pils_removed(list) - pillows retained for imputation (same semantics as your original)
         df_summary_impute  - updated summary table with imputed values
     """
-    # Lazy import to keep signature "drop-in" if you paste into the same module.
-    import xarray as xr  # noqa: F401
 
     # --- 1) Identify pillows with enough observations to attempt imputation ---
     drop_bool = (

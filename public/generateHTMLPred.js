@@ -170,14 +170,26 @@ function inferModelAndSeasonality(csvPath) {
 
   for (var i = 0; i < parts.length; i++) {
     var p = parts[i];
+
     if (SEASONALITIES.indexOf(p) > -1) {
       var seasonality = p;
+
+      // modelName is the directory right before seasonality
       var modelName = i > 0 ? parts[i - 1] : "UNKNOWN_MODEL";
+
+      // If layout is .../<BASIN>/models/<MODEL>/<seasonality>/...
+      // then parts[i-2] will be "models"
+      if (i > 1 && parts[i - 2] === "models") {
+        modelName = parts[i - 1]; // keep same, but this makes intent explicit
+      }
+
       return { modelName: modelName, seasonality: seasonality };
     }
   }
+
   return null;
 }
+
 
 // --------------------------
 // Timeseries PNG discovery
@@ -235,20 +247,46 @@ function buildHTMLForBasin(basin, basinRoot, cb) {
 
       // Pick one CSV per (modelName, seasonality): choose lexicographically last filename
       var pickedMap = {};
+      function isModelsPath(fp) {
+        // portable: check for path segment "models"
+        return fp.split(path.sep).indexOf("models") > -1;
+      }
+
       discovered.forEach(function (d) {
         var key = d.modelName + "||" + d.seasonality;
+
         if (!pickedMap[key]) {
           pickedMap[key] = d;
-        } else {
-          if (path.basename(d.csvPath) > path.basename(pickedMap[key].csvPath)) {
-            pickedMap[key] = d;
-          }
+          return;
+        }
+
+        var cur = pickedMap[key];
+
+        // 1) Prefer anything under .../models/...
+        var dIsModels = isModelsPath(d.csvPath);
+        var curIsModels = isModelsPath(cur.csvPath);
+
+        if (dIsModels && !curIsModels) {
+          pickedMap[key] = d;
+          return;
+        }
+        if (!dIsModels && curIsModels) {
+          return;
+        }
+
+        // 2) If both same type, fall back to lexicographically last filename
+        if (path.basename(d.csvPath) > path.basename(cur.csvPath)) {
+          pickedMap[key] = d;
         }
       });
+
 
       var picked = Object.keys(pickedMap).map(function (k) {
         return pickedMap[k];
       });
+
+      console.log(`[${basin}] picked CSVs:`);
+      picked.forEach(p => console.log("  ", p.modelName, p.seasonality, p.csvPath));  
 
       var pending = picked.length;
       var results = []; // {modelName, seasonality, headerRaw, rows}
@@ -259,6 +297,10 @@ function buildHTMLForBasin(basin, basinRoot, cb) {
           if (err2) return cb(err2);
 
           if (!firstHeaderRaw) firstHeaderRaw = res.headerRaw;
+
+          const dateCol = res.headerRaw.indexOf("Date");
+          console.log(`[${basin}] ${item.modelName}/${item.seasonality} last two dates:`,
+            res.rows.map(r => r[dateCol]));
 
           results.push({
             modelName: item.modelName,
@@ -285,6 +327,8 @@ function buildHTMLForBasin(basin, basinRoot, cb) {
     }
   );
 }
+
+
 
 function renderConcatenatedTableHTML(
   basin,

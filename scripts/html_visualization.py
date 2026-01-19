@@ -39,13 +39,14 @@ def load_aso_metadata(aso_site_name: str,
     demBin_fpath = cfg["data_filepaths"]["aso_demBin"]
     aso_spatial_fpath = cfg["data_filepaths"]["aso_spatial"]
     aso_tseries_fpath = cfg["data_filepaths"]["aso_temporal"]
+    uaswe_dir = cfg["data_filepaths"]["uaswe_dir"]
     snowmodel_dir = cfg["data_filepaths"]["snowmodel_dir"]
     snodas_dir = cfg["data_filepaths"]["snodas_dir"]
     insitu_dir = cfg["data_filepaths"]["insitu_dir"]
     mlrPred_dir = cfg["data_filepaths"]["mlrPred_dir"]
     if not os.path.exists(mlrPred_dir): os.makedirs(mlrPred_dir)
     shape_crs = f'EPSG:{cfg["crs"]["epsg"]}'
-    return elev_bin_labels, shape_fpath, demBin_fpath, aso_spatial_fpath, aso_tseries_fpath, snowmodel_dir, snodas_dir, insitu_dir, mlrPred_dir, shape_crs, cfg
+    return elev_bin_labels, shape_fpath, demBin_fpath, aso_spatial_fpath, aso_tseries_fpath, snowmodel_dir, snodas_dir, insitu_dir, mlrPred_dir, uaswe_dir, shape_crs, cfg
 
 def load_aso_data(aso_spatial_fpath: str,
                   aso_tseries_fpath: str,
@@ -180,9 +181,10 @@ if __name__ =="__main__":
     # user.
     aso_site_name = sys.argv[1]
     water_year = int(sys.argv[2])
-    isSplit = bool(int(sys.argv[3]))
-    isAccum = bool(int(sys.argv[4]))
-    showOutput = bool(int(sys.argv[5]))
+    plotDir = sys.argv[3]
+    # isSplit = bool(int(sys.argv[3]))
+    # isAccum = bool(int(sys.argv[4]))
+    # showOutput = bool(int(sys.argv[5]))
     # default settings.
     model_num,isMean,isCombination,prediction_mm_df,prediction_acreFt_df,prediction_pillow_df,user_qa_level,elev_band, QA_flag = get_default_settings()
 
@@ -191,7 +193,7 @@ if __name__ =="__main__":
         LOAD DATA -----------------------------------------------
     """
     # load metadata information.
-    elev_bin_labels, shape_fpath, demBin_fpath, aso_spatial_fpath, aso_tseries_fpath, snowmodel_dir, snodas_dir, insitu_dir, mlrPred_dir, shape_crs,cfg = load_aso_metadata(aso_site_name)
+    elev_bin_labels, shape_fpath, demBin_fpath, aso_spatial_fpath, aso_tseries_fpath, snowmodel_dir, snodas_dir, insitu_dir, mlrPred_dir, uaswe_dir, shape_crs,cfg = load_aso_metadata(aso_site_name)
 
     # pillows to exclude from QA.
     exclude_pillows = cfg['pillow_api']['exclude_pillows']
@@ -234,144 +236,67 @@ if __name__ =="__main__":
     # get timing variables.
     year_str, month_str, day_str, wy_str = timing_vars(obs_data_test_ds)
 
-    print(f'RUNNING MLR PREDICTION: {aso_site_name}; up to {str(obs_data_test_ds.time.values[-1])[0:10]}')
+    # load UASWE data.
+    uaswe_df = pd.read_csv(f'{uaswe_dir}mean_swe_uaswe_acreFt_wy{water_year}.csv')
+
+    # load SNODAS data.
+    snodas_df = pd.read_csv(f'{snodas_dir}mean_swe_snodas_acreFt_wy{water_year}.csv')
+
+    # load SnowModel data.
+    sm_df = pd.read_csv(f'{snowmodel_dir}mean_swe_snowmodel_acreFt_wy{water_year}.csv')
+    # HARDCODED BIAS CORRECTION FOR TOTAL SNOWMODEL SWE!!!
+    sm_df["total"] = sm_df["total"] * 0.554
+
+    # convert date columns to datetime.
+    snodas_df['Date'] = pd.to_datetime(snodas_df['Date'])
+    uaswe_df['Date'] = pd.to_datetime(uaswe_df['Date'])
+    sm_df['Date'] = pd.to_datetime(sm_df['Date'])
+
+    seasonal_dirs = ["season","accum","melt"]
+    models = ["COMMON_MASK"]
+
+    
+    for aso_stack_type in models:
+        count = 0
+        mlr_tables = []
+        mlr_identifiers = {}
+        for seasonal_dir in seasonal_dirs:
+            acre_path = f'{mlrPred_dir}/{aso_stack_type}/{seasonal_dir}/acreFt/'
+            mm_path = f'{mlrPred_dir}/{aso_stack_type}/{seasonal_dir}/mm/'
+
+            # read data.
+            prediction_acreFt_df = pd.read_csv(f'{acre_path}prediction_acreFt_wy{water_year}_combination.csv')
+            prediction_mm_df = pd.read_csv(f'{mm_path}prediction_mm_wy{water_year}_combination.csv')
+
+            # convert date columns to datetime.
+            prediction_mm_df['Date'] = pd.to_datetime(prediction_mm_df['Date'])
+            prediction_acreFt_df['Date'] = pd.to_datetime(prediction_acreFt_df['Date'])
+            
+            mlr_tables.append(prediction_acreFt_df)
+            mlr_identifiers[count] = [aso_stack_type, seasonal_dir, 'acreFt']
+            count += 1 
+            mlr_tables.append(prediction_mm_df)
+            mlr_identifiers[count] = [aso_stack_type, seasonal_dir, 'mm']
+            count += 1 
+
+        print(mlr_identifiers)
+        print(f'RUNNING MLR VISUALIZATION: {aso_site_name}; up to {str(obs_data_test_ds.time.values[-1])[0:10]}')
+
+        plotting.html_timeseries_plot(mlr_tables,
+                                  mlr_identifiers,
+                                  uaswe_df,
+                                  snodas_df,
+                                  sm_df,
+                                  aso_site_name,
+                                  plotDir,
+                                  aso_stack_type,
+                                  train_infer = 'predict NaNs',
+                                  saveFIG = True,
+        )
+    
+
     print('')
 
-    """
-        PREPROCESSING DATA -----------------------------------------------
-    """
-    print('PREPROCESSING DATA ...\n')
-    aso_spatial_test,aso_tseries_test,aso_spatial_train,aso_tseries_train,obs_data_train,obs_data_qa = preprocessing.train_test_split(aso_spatial_ds,
-                                                                                                      aso_tseries_ds,
-                                                                                                      obs_data_train_lst,
-                                                                                                      water_year)
-
-    df_sum_total = preprocessing.combine_aso_insitu(obs_data_train,
-                             aso_tseries_train['aso_swe'],
-                             elev_idx = -1, # total = -1
-                            )
-    
-    drop_na_df,all_pils,baseline_pils = preprocessing.generate_drop_NaNs_table(df_sum_total,
-                                                                           obs_data_qa)
-
-    # pillows = [i for i in pillows if i not in exclude_pillows]
-
-    historic_vals_df = preprocessing.create_qa_tables(obs_data_train_lst, [], isQA=False)
-
-    impute_dir = f'{mlrPred_dir}imputation/'
-    
-    obs_data_impute,pils_removed,impute_na_df = preprocessing.imputation_w_pillows(df_sum_total,
-                                                                                   all_pils,
-                                                                                   obs_data_qa,
-                                                                                   aso_site_name,
-                                                                                   water_year,
-                                                                                   impute_dir,
-                                                                                   obs_threshold = 0.50,
-                                                                                   saveImputeCSV = True,
-    )
-
-    obs_data_impute_sm,pils_removed_sm,impute_na_df_sm = preprocessing.imputation_w_snowmodel(
-                                                df_sum_total,
-                                                all_pils,
-                                                obs_data_qa,
-                                                sm_train_ds,
-                                                aso_site_name,
-                                                water_year,
-                                                impute_dir,
-                                                obs_threshold = 0.50,
-                                                saveImputeCSV = True,
-                                                train_start_year = 2013,
-                                                predictor_vars=("swed_best", "swed_second", "swed_third"),
-                                            )
-    
-    """
-        RUN MODEL -----------------------------------------------
-    """
-    print('RUNNING MLR MODEL ...\n')
-
-    start = time.time()
-
-    for t_idx in range(1,obs_data_test_lst[0].time.shape[0]):
-        current_date_np = obs_data_test_lst[0].time[t_idx].values
-        current_date = datetime(pd.to_datetime(current_date_np).year,pd.to_datetime(current_date_np).month,pd.to_datetime(current_date_np).day)
-    
-
-        current_vals_df,all_pils_QA,baseline_pils_,df_qa_table = preprocessing.process_daily_qa(
-                                                                   t_idx,
-                                                                   obs_data_test_lst_raw,
-                                                                   obs_data_test_lst,
-                                                                   baseline_pils,
-                                                                   printOutput = showOutput,
-                                                                              )
-
-        try:
-            summary_dict_all,df_sheet_lst_mm,df_sheet_lst_acreFt,df_sheet_pillow_lst = lm_model.run_all_mlr_models(aso_tseries_train.aso_swe,obs_data_qa,current_vals_df.reset_index(names = 'time'),
-                                                    aso_site_name,all_pils,all_pils_QA,df_sum_total,baseline_pils_,start_wy,end_wy,isSplit,isAccum,
-                                                    mlrPred_dir,current_date,dem_bin.dem_bin,elev_bin_labels,QA_flag=QA_flag,
-                                                    modelNUM = model_num,isMean = False,saveModels = False,showOutput = showOutput,
-                                                    saveValidation = False,pickledir = None,add_zeroASO = True,isCombination_ = isCombination)
-
-            prediction_mm_df,prediction_acreFt_df,prediction_pillow_df = postprocessing.arrange_prediction_tables(df_sheet_lst_mm,
-                                                                                                          df_sheet_lst_acreFt,
-                                                                                                          df_sheet_pillow_lst,
-                                                                                                          elev_bin_labels,
-                                                                                                          prediction_mm_df,
-                                                                                                          prediction_acreFt_df,
-                                                                                                          prediction_pillow_df,
-                                                                                                          )
-            print(current_date)
-        except:
-            prediction_mm_df,prediction_acreFt_df,prediction_pillow_df = postprocessing.fill_NaNs_prediction_tables(df_sheet_lst_mm,
-                                                                                                          df_sheet_lst_acreFt,
-                                                                                                          df_sheet_pillow_lst,
-                                                                                                          elev_bin_labels,
-                                                                                                          current_date,
-                                                                                                          prediction_mm_df,
-                                                                                                          prediction_acreFt_df,
-                                                                                                          prediction_pillow_df,
-                                                                                                          )
-            print(current_date,' COULD NOT PROCESS MLR!!')
-
-                                             
-    end = time.time()
-    elapsed_min = (end - start) / 60
-    print(f"Elapsed time: {elapsed_min:.2f} minutes")
-
-    """
-        OUTPUT
-    """
-
-    if isSplit:
-        if isAccum:
-            seasonal_dir = 'accum'
-        else:
-            seasonal_dir = 'melt'
-    else:
-        seasonal_dir = 'season'
-    
-    aso_stack_type = 'COMMON_MASK'
-
-    dir_path = f'{mlrPred_dir}/{aso_stack_type}/'
-    if not os.path.exists(dir_path): os.makedirs(dir_path)
-    dir_path = f'{mlrPred_dir}/{aso_stack_type}/{seasonal_dir}/'
-    if not os.path.exists(dir_path): os.makedirs(dir_path) 
-#   dir_path = f'{mlrPred_dir}/{aso_stack_type}/{seasonal_dir}/{elev_dir}/'
-#   if not os.path.exists(dir_path): os.makedirs(dir_path)
-    dir_path = f'{mlrPred_dir}/{aso_stack_type}/{seasonal_dir}/'
-    if not os.path.exists(dir_path): os.makedirs(dir_path)
-    acre_path = f'{mlrPred_dir}/{aso_stack_type}/{seasonal_dir}/acreFt/'
-    if not os.path.exists(acre_path): os.makedirs(acre_path)
-    mm_path = f'{mlrPred_dir}/{aso_stack_type}/{seasonal_dir}/mm/'
-    if not os.path.exists(mm_path): os.makedirs(mm_path)
-    pillows_path = f'{mlrPred_dir}/{aso_stack_type}/{seasonal_dir}/pillows/'
-    if not os.path.exists(pillows_path): os.makedirs(pillows_path)
-    
-
-    prediction_mm_df.to_csv(f'{mm_path}prediction_mm_wy{water_year}_combination.csv',index = False)
-    prediction_acreFt_df.to_csv(f'{acre_path}prediction_acreFt_wy{water_year}_combination.csv',index = False)
-    prediction_pillow_df.to_csv(f'{pillows_path}prediction_pillows_wy{water_year}_combination.csv',index = False)
-
-    print('MLR PREDICTION COMPLETE!!!\n')
 
 
     

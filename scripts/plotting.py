@@ -4,226 +4,529 @@ import xarray as xr
 import pandas as pd
 import matplotlib.pyplot as plt
 from typing import List, Dict
+import numpy as np
 
 
-def sheet_for_heatmap(sheet,end_date,area_dict):
-    plot_cols = sheet.columns.to_list()
-    plot_cols.remove('Model Type')
-    plot_cols.remove('Training Infer NaNs')
-    plot_cols.remove('Prediction QA')
-    # clean table.
-    new_sheet = sheet[plot_cols]
-    new_sheet = new_sheet.set_index('Date')
-    new_sheet = new_sheet[['Total','>12k','11k-12k','10k-11k','9k-10k','8k-9k','7k-8k','<7k']]
-    new_sheet = new_sheet[new_sheet.index >= np.datetime64(end_date + timedelta(days=-14))]
-    for col in new_sheet.columns:
-        new_sheet[col] = new_sheet[col] / area_dict[col] * 12
-    return new_sheet
-
-
-def prediction_by_elevation_heatmap2(sheet1,sheet2,sheet3,sheet4,sheet5,sheet6,end_date,area_dict,aso_site_name,
-                                     savePlot = True,showPlot = False):
+def timeseries_pillow_selection(mlr_pred_lst: List,
+                                mlr_pred_dict: Dict,
+                                uaswe_m_df: pd.DataFrame,
+                                snodas_m_df: pd.DataFrame,
+                                obs_raw: xr.Dataset,
+                                obs_clean: xr.Dataset,
+                                start_date: str = None,
+                                end_date: str = None,
+                                model_type: str = 'accum',
+                                model_units: str = 'mm'
+                                ):
     """
-        Plot heatmap of last two week predictions by elevation.
-        Input:
-            sheet - geopandas dataframe for predictions.  
-        Output:
-            plot of basins.
+    Docstring for timeseries_pillow_selection
+    
+    :param mlr_pred_lst: Description
+    :type mlr_pred_lst: List
+    :param mlr_pred_dict: Description
+    :type mlr_pred_dict: Dict
+    :param uaswe_m_df: Description
+    :type uaswe_m_df: pd.DataFrame
+    :param snodas_m_df: Description
+    :type snodas_m_df: pd.DataFrame
+    :param obs_raw: Description
+    :type obs_raw: xr.Dataset
+    :param obs_clean: Description
+    :type obs_clean: xr.Dataset
+    :param start_date: Description
+    :type start_date: str
+    :param end_date: Description
+    :type end_date: str
+    :param model_type: Description
+    :type model_type: str
+    :param model_units: Description
+    :type model_units: str
     """
-    # list of elevations.
-    new_sheet1 = sheet_for_heatmap(sheet1,end_date,area_dict)
-    new_sheet2 = sheet_for_heatmap(sheet2,end_date,area_dict)
-    new_sheet3 = sheet_for_heatmap(sheet3,end_date,area_dict)
-    new_sheet4 = sheet_for_heatmap(sheet4,end_date,area_dict)
-    new_sheet5 = sheet_for_heatmap(sheet5,end_date,area_dict)
-    new_sheet6 = sheet_for_heatmap(sheet6,end_date,area_dict)
-    all_sheets = [new_sheet1,new_sheet2,new_sheet3,new_sheet4,new_sheet5,new_sheet6]
+    # get datatables.
+    for k,v in mlr_pred_dict.items():
+        print(k,v)
+        if v[1] == model_type and v[2] == model_units:
+            idx_mm = k
+
+    for k,v in mlr_pred_dict.items():
+        if v[1] == model_type and v[2] == 'pillows':
+            idx_pillows = k
+    print(idx_mm,idx_pillows)
+    
+    if start_date is None:
+        start_date = str(mlr_pred_lst[0]['Date'].min().values)[:10]
+    if end_date is None:
+        end_date = str(mlr_pred_lst[0]['Date'].max().values)[:10]
+    
+    # slice predictions and pillows.
+    df_pred_slice = mlr_pred_lst[idx_mm][(mlr_pred_lst[idx_mm]['Training Infer NaNs'] == 'predict NaNs') &  \
+              (mlr_pred_lst[idx_mm]['Date'] >= np.datetime64(start_date)) & \
+              (mlr_pred_lst[idx_mm]['Date'] <= np.datetime64(end_date))]
+
+    df_pil_slice = mlr_pred_lst[idx_pillows][(mlr_pred_lst[idx_pillows]['Training Infer NaNs'] == 'predict NaNs') &  \
+              (mlr_pred_lst[idx_pillows]['Date'] >= np.datetime64(start_date)) & \
+              (mlr_pred_lst[idx_pillows]['Date'] <= np.datetime64(end_date)) \
+              ][['Date','Basin']]
+    
+    # create unique pillows and matrix.
+    df_pil_explode, df_pil_mat, unique_pils = pillow_explode(df_pil_slice)
+    # slice raw observations.
+    raw_df = obs_raw.where(obs_raw.time >= np.datetime64(start_date),drop = True) \
+                    .where(obs_raw.time <= np.datetime64(end_date),drop = True) \
+                    .where(obs_raw.time.isin(df_pil_slice.Date.values),drop = True) \
+                   [unique_pils].to_dataframe()
+    # slice clean observations.
+    test_df = obs_clean.where(obs_clean.time >= np.datetime64(start_date),drop = True) \
+                    .where(obs_clean.time <= np.datetime64(end_date),drop = True) \
+                    .where(obs_clean.time.isin(df_pil_slice.Date.values),drop = True) \
+                   [unique_pils].to_dataframe()
+    # diff mask.
+    diff_mask = ~(
+        (raw_df == test_df) |
+        (raw_df.isna() & test_df.isna())
+    )
+    # diff array.
+    diff_arr = mask_to_matrix(diff_mask)
+    # nan mask.
+    nan_mask = ~raw_df.isna()
+    # nan array.
+    nan_arr = mask_to_matrix(nan_mask)
 
     # plotting.
-    all_max = 0.0
-    all_min = 1000.0
-    for i in range(0,len(all_sheets)):
-        max_ = all_sheets[i].max().max()
-        min_ = all_sheets[i].min().min()
-        if max_ > all_max:
-            all_max = max_
-        if min_ < all_min:
-            all_min = min_
+    fig,ax = plt.subplots(5,1,figsize=(10,10),sharex=False)
+    mlr_timeseries_plot(mlr_pred_lst,mlr_pred_dict,uaswe_m_df,snodas_m_df,start_date,end_date,ax[0])
+    
+    for pil in unique_pils:
+        test_df[pil].plot(ax=ax[1],label = pil)
+    ax[1].legend()
+    ax[1].set_title('Pillow Observations',fontweight = 'bold')
 
-    fig,ax = plt.subplots(3,2,dpi = 250,sharex = True,sharey = True,constrained_layout = True)
-    for i in range(0,len(all_sheets)):
-        im = ax[i//2,i%2].imshow(all_sheets[i].T,cmap = 'inferno',vmax = all_max,vmin = all_min)
-        if i%2 == 0:
-            ax[i//2,i%2].set_yticks(ticks = np.arange(0,len(all_sheets[i].columns)), labels = all_sheets[i].columns)
-        if i//2 == 2:
-            ax[i//2,i%2].set_xticks(ticks = np.arange(0,len(all_sheets[i]))[::2], labels = all_sheets[i].index.strftime('%m-%d')[::2],rotation = 45)
-    ax[0,0].set_title('Drop NaNs QA = 1',fontweight = 'bold')
-    ax[0,1].set_title('Predict NaNs QA = 1',fontweight = 'bold')
-    ax[1,0].set_title('Drop NaNs QA = 2',fontweight = 'bold')
-    ax[1,1].set_title('Predict NaNs QA = 2',fontweight = 'bold')
-    ax[2,0].set_title('Drop NaNs QA = 3',fontweight = 'bold')
-    ax[2,1].set_title('Predict NaNs QA = 3',fontweight = 'bold')
-    plt.suptitle('Model Predictions by Elevation',fontweight = 'bold',fontsize = 16)
-    fig.subplots_adjust(right=0.90)
-    cbar_ax = fig.add_axes([0.48, 0.10, 0.02, 0.8])
-    fig.colorbar(im, cax=cbar_ax,label = 'SWE [in]')
-    #plt.tight_layout()
-    if savePlot:
-        plt.savefig(f'./data/predictions/{aso_site_name}/historic/elevation_comparison.png',dpi = 250)
-    if showPlot:
+    im = ax[2].imshow(
+        df_pil_mat.values,
+        aspect="auto",
+        interpolation="nearest",
+        cmap = 'binary',
+    )
+    ax[2].set_title('Pillow Selection (black = selected)',fontweight = 'bold')
+    im = ax[3].imshow(
+        nan_arr[::-1,:],
+        aspect="auto",
+        interpolation="nearest",
+        cmap = 'binary'
+    )
+    ax[3].set_title('Non-NaN Observations (black = observed)',fontweight = 'bold')
+    im = ax[4].imshow(
+        diff_arr[::-1,:],
+        aspect="auto",
+        interpolation="nearest",
+        cmap = 'binary'
+    )
+    ax[4].set_title('QA (black = Flagged)',fontweight = 'bold')
+    for i in range(0,5):
+        if i == 4:
+            ax[i].set_yticks(range(len(df_pil_mat.index)))
+            ax[i].set_yticklabels(df_pil_mat.index)
+            ax[i].set_xticks(range(len(df_pil_mat.columns)))
+            ax[i].set_xticklabels(
+                [d.strftime("%Y-%m-%d") for d in df_pil_mat.columns],
+                rotation=45,
+                ha="right"
+            )
+            ax[i].set_xlabel('Date',fontweight = 'bold')
+        elif i <= 1:
+            ax[i].set_ylabel('SWE [mm]',fontweight = 'bold')
+            ax[i].set_xticks([])
+            ax[i].set_xlabel('')
+        else:
+            ax[i].set_xticks([])
+            ax[i].set_xlabel('')
+            ax[i].set_yticks(range(len(df_pil_mat.index)))
+            ax[i].set_yticklabels(df_pil_mat.index)
+    plt.tight_layout()
+    plt.show()
+
+    return df_pred_slice,df_pil_slice,df_pil_explode,df_pil_mat,diff_arr,nan_arr,diff_mask
+
+def mask_to_matrix(df_mask):
+    df = df_mask.copy()
+
+    # Ensure datetime + sorted
+    df.index = pd.to_datetime(df.index)
+    df = df.sort_index()
+
+    # Convert to numeric for plotting:
+    #   True -> 1, False -> 0, NaN -> np.nan (so it can be a separate color if you want)
+    arr = df.astype("float").to_numpy().T  
+    return arr
+
+def pillow_explode(df_pil_slice):
+    df = df_pil_slice.copy()
+    df["Date"] = pd.to_datetime(df["Date"])
+
+    # Split basin strings into lists
+    df["Pillow"] = df["Basin"].str.split(r"\s*,\s*")
+
+    # Explode to long format
+    df_long = df.explode("Pillow")[["Date", "Pillow"]]
+    # Create binary presence matrix
+    mat = (
+        df_long
+        .assign(value=1)
+        .pivot(index="Pillow", columns="Date", values="value")
+        .fillna(0)
+        .sort_index()
+    )
+    unique_pils = df_long["Pillow"].unique().tolist()
+    return df_long,mat,unique_pils
+
+def slice_timeseries_df(start_date: str,
+                     end_date: str,
+                     df: pd.DataFrame):
+    """
+    """
+    if start_date is not None:
+        df = df[df['Date'] >= np.datetime64(start_date)]
+    if end_date is not None:
+        df = df[df['Date'] <= np.datetime64(end_date)]
+    return df
+
+def slice_timeseries_xr(start_date: str,
+                     end_date: str,
+                     ds: xr.Dataset):
+    """
+    """
+    if start_date is not None:
+        ds = ds.sel(Date=slice(np.datetime64(start_date), None))
+    if end_date is not None:
+        ds = ds.sel(Date=slice(None, np.datetime64(end_date)))
+    return ds
+def mlr_timeseries_plot(
+        mlr_tables: List,
+        mlr_identifiers: Dict,
+        uaswe_m_df: pd.DataFrame,
+        snodas_m_df: pd.DataFrame,
+        start_date: str,
+        end_date: str,
+        ax):
+    """
+    """
+    ax.plot(uaswe_m_df['Date'],uaswe_m_df['total']*1000,label='UASWE',color='black',linewidth=2,linestyle = '--')
+    ax.plot(snodas_m_df['Date'],snodas_m_df['total']*1000,label='SNODAS',color='gray',linewidth=2,linestyle = '--')
+    mlr_tables[4][mlr_tables[4]['Training Infer NaNs'] == 'predict NaNs'].plot(ax=ax,x='Date',y='Basin',color = 'red',linewidth=2,label = 'MLR Prediction')
+
+    ax.legend()
+    ax.set_title(f'Model Predictions - {mlr_identifiers[5][1]}',fontweight = 'bold')
+    ax.set_xlim(np.datetime64(start_date),np.datetime64(end_date))
+    return
+    
+
+def html_timeseries_plot(
+    mlr_lst: List,
+    mlr_ids: Dict,
+    uaswe_df: pd.DataFrame,
+    snodas_df: pd.DataFrame,
+    sm_df: pd.DataFrame,
+    basin: str,
+    plotDir: str = None,
+    model_name: str = None,
+    train_infer: str = 'predict NaNs',
+    saveFIG: bool = True,
+):
+    fig, ax = plt.subplots(dpi=200, sharex=True, figsize=(10, 6))
+
+    # --- BASE MODEL PREDICTIONS ---
+    l1, = ax.plot(
+        uaswe_df['Date'], uaswe_df['total'] / 1000,
+        label='UASWE', color='black', linestyle='--'
+    )
+    l2, = ax.plot(
+        snodas_df['Date'], snodas_df['total'] / 1000,
+        label='SNODAS', color='gray', linestyle='--'
+    )
+    l3, = ax.plot(
+        sm_df['Date'], sm_df['total'] / 1000,
+        label='SnowModel', color='brown', linestyle='--'
+    )
+
+    model_handles = [l1, l2, l3]
+
+    # --- MLR PREDICTIONS ---
+    mlr_handles = []
+    mlr_labels = []
+
+    for i in range(len(mlr_lst)):
+        mlr_df = mlr_lst[i]
+        mlr_id = mlr_ids[i]
+
+        if mlr_id[2] == 'acreFt':
+            line = mlr_df[
+                mlr_df['Training Infer NaNs'] == train_infer
+            ].plot(
+                x='Date', y='Basin', ax=ax,
+                linestyle='-', legend=False
+            )
+
+            h = ax.lines[-1]  # grab the line just added
+            mlr_handles.append(h)
+            mlr_labels.append(f"MLR {mlr_id[1]}")
+
+    # --- FIRST LEGEND (MLR models — TOP) ---
+    leg1 = ax.legend(
+        handles=mlr_handles,
+        labels=mlr_labels,
+        title='MLR Predictions',
+        loc='upper left',
+        bbox_to_anchor=(1.02, 1.0),
+        title_fontproperties={'weight': 'bold'}
+    )
+    ax.add_artist(leg1)
+
+    # --- SECOND LEGEND (Base models — BOTTOM) ---
+    ax.legend(
+        handles=model_handles,
+        title='Model Predictions',
+        loc='lower left',
+        bbox_to_anchor=(1.02, 0.0),
+        title_fontproperties={'weight': 'bold'}
+    )
+
+    ax.set_ylabel('Mean SWE [thousand acre-feet]', fontweight='bold')
+    ax.set_xlabel('Date', fontweight='bold')
+    ax.set_title(f'Basin Mean SWE Prediction', fontweight='bold')
+    ax.set_xlim(np.datetime64('2026-01-01'),None)
+
+    # Make room for legends on the right
+    fig.subplots_adjust(right=0.75)
+
+    if saveFIG:
+        print(plotDir)
+        plt.savefig(f'{plotDir}/{basin}_{model_name}_timeseries_plot.png', dpi=200, bbox_inches='tight')
+    else:
         plt.show()
+
+    plt.close(fig)
     return
 
 
 
-def create_prediction_plot(sheet1,sheet2,sheet3,sheet4,sheet5,sheet6,aso_site_name,
-                           end_date,area_dict,basinID = 'SBF',showPlot = True,savePlot = True):
-    """
-        Plot heatmap of last two week predictions by elevation.
-        Input:
-            sheet - geopandas dataframe for predictions.  
-        Output:
-            plot of basins.
-    """
-    # instantiate figure.
-    fig,ax = plt.subplots(1,2,figsize = (10,5),sharex = False,gridspec_kw = {'width_ratios': [4,1]})
-    # ax[0] = plot_predicted_comparisons2(sheet1,sheet2,sheet3,sheet4,sheet5,sheet6,aso_site_name,end_date,ax[0],
-    #                            basinID = 'SBF',showPlot = True,savePlot = True)
-    ax[0] = plot_predicted_comparisons2(sheet1,sheet2,sheet3,sheet4,sheet5,sheet6,aso_site_name,end_date,ax[0],
-                               basinID = 'SBF',showPlot = True,savePlot = True)
-    # ax[0] = prediction_by_elevation_heatmap2(sheet1,end_date,area_dict,ax[0])
-    ax[1] = prediction_by_elevation_heatmap2(sheet1,end_date,area_dict,ax[1])
-    plt.tight_layout()
-    plt.show()
+# def sheet_for_heatmap(sheet,end_date,area_dict):
+#     plot_cols = sheet.columns.to_list()
+#     plot_cols.remove('Model Type')
+#     plot_cols.remove('Training Infer NaNs')
+#     plot_cols.remove('Prediction QA')
+#     # clean table.
+#     new_sheet = sheet[plot_cols]
+#     new_sheet = new_sheet.set_index('Date')
+#     new_sheet = new_sheet[['Total','>12k','11k-12k','10k-11k','9k-10k','8k-9k','7k-8k','<7k']]
+#     new_sheet = new_sheet[new_sheet.index >= np.datetime64(end_date + timedelta(days=-14))]
+#     for col in new_sheet.columns:
+#         new_sheet[col] = new_sheet[col] / area_dict[col] * 12
+#     return new_sheet
 
 
-def plot_predicted_comparisons3(sheet1,sheet2,sheet3,sheet4,sheet5,sheet6,aso_site_name,end_date,ax_,
-                               basinID = 'SBF',showPlot = True,savePlot = True):
+# def prediction_by_elevation_heatmap2(sheet1,sheet2,sheet3,sheet4,sheet5,sheet6,end_date,area_dict,aso_site_name,
+#                                      savePlot = True,showPlot = False):
+#     """
+#         Plot heatmap of last two week predictions by elevation.
+#         Input:
+#             sheet - geopandas dataframe for predictions.  
+#         Output:
+#             plot of basins.
+#     """
+#     # list of elevations.
+#     new_sheet1 = sheet_for_heatmap(sheet1,end_date,area_dict)
+#     new_sheet2 = sheet_for_heatmap(sheet2,end_date,area_dict)
+#     new_sheet3 = sheet_for_heatmap(sheet3,end_date,area_dict)
+#     new_sheet4 = sheet_for_heatmap(sheet4,end_date,area_dict)
+#     new_sheet5 = sheet_for_heatmap(sheet5,end_date,area_dict)
+#     new_sheet6 = sheet_for_heatmap(sheet6,end_date,area_dict)
+#     all_sheets = [new_sheet1,new_sheet2,new_sheet3,new_sheet4,new_sheet5,new_sheet6]
+
+#     # plotting.
+#     all_max = 0.0
+#     all_min = 1000.0
+#     for i in range(0,len(all_sheets)):
+#         max_ = all_sheets[i].max().max()
+#         min_ = all_sheets[i].min().min()
+#         if max_ > all_max:
+#             all_max = max_
+#         if min_ < all_min:
+#             all_min = min_
+
+#     fig,ax = plt.subplots(3,2,dpi = 250,sharex = True,sharey = True,constrained_layout = True)
+#     for i in range(0,len(all_sheets)):
+#         im = ax[i//2,i%2].imshow(all_sheets[i].T,cmap = 'inferno',vmax = all_max,vmin = all_min)
+#         if i%2 == 0:
+#             ax[i//2,i%2].set_yticks(ticks = np.arange(0,len(all_sheets[i].columns)), labels = all_sheets[i].columns)
+#         if i//2 == 2:
+#             ax[i//2,i%2].set_xticks(ticks = np.arange(0,len(all_sheets[i]))[::2], labels = all_sheets[i].index.strftime('%m-%d')[::2],rotation = 45)
+#     ax[0,0].set_title('Drop NaNs QA = 1',fontweight = 'bold')
+#     ax[0,1].set_title('Predict NaNs QA = 1',fontweight = 'bold')
+#     ax[1,0].set_title('Drop NaNs QA = 2',fontweight = 'bold')
+#     ax[1,1].set_title('Predict NaNs QA = 2',fontweight = 'bold')
+#     ax[2,0].set_title('Drop NaNs QA = 3',fontweight = 'bold')
+#     ax[2,1].set_title('Predict NaNs QA = 3',fontweight = 'bold')
+#     plt.suptitle('Model Predictions by Elevation',fontweight = 'bold',fontsize = 16)
+#     fig.subplots_adjust(right=0.90)
+#     cbar_ax = fig.add_axes([0.48, 0.10, 0.02, 0.8])
+#     fig.colorbar(im, cax=cbar_ax,label = 'SWE [in]')
+#     #plt.tight_layout()
+#     if savePlot:
+#         plt.savefig(f'./data/predictions/{aso_site_name}/historic/elevation_comparison.png',dpi = 250)
+#     if showPlot:
+#         plt.show()
+#     return
+
+
+
+# def create_prediction_plot(sheet1,sheet2,sheet3,sheet4,sheet5,sheet6,aso_site_name,
+#                            end_date,area_dict,basinID = 'SBF',showPlot = True,savePlot = True):
+#     """
+#         Plot heatmap of last two week predictions by elevation.
+#         Input:
+#             sheet - geopandas dataframe for predictions.  
+#         Output:
+#             plot of basins.
+#     """
+#     # instantiate figure.
+#     fig,ax = plt.subplots(1,2,figsize = (10,5),sharex = False,gridspec_kw = {'width_ratios': [4,1]})
+#     # ax[0] = plot_predicted_comparisons2(sheet1,sheet2,sheet3,sheet4,sheet5,sheet6,aso_site_name,end_date,ax[0],
+#     #                            basinID = 'SBF',showPlot = True,savePlot = True)
+#     ax[0] = plot_predicted_comparisons2(sheet1,sheet2,sheet3,sheet4,sheet5,sheet6,aso_site_name,end_date,ax[0],
+#                                basinID = 'SBF',showPlot = True,savePlot = True)
+#     # ax[0] = prediction_by_elevation_heatmap2(sheet1,end_date,area_dict,ax[0])
+#     ax[1] = prediction_by_elevation_heatmap2(sheet1,end_date,area_dict,ax[1])
+#     plt.tight_layout()
+#     plt.show()
+
+
+# def plot_predicted_comparisons3(sheet1,sheet2,sheet3,sheet4,sheet5,sheet6,aso_site_name,end_date,ax_,
+#                                basinID = 'SBF',showPlot = True,savePlot = True):
     
 
-def plot_predicted_comparisons2(sheet1,sheet2,sheet3,sheet4,sheet5,sheet6,aso_site_name,end_date,ax_,
-                               basinID = 'SBF',showPlot = True,savePlot = True):
-    """
-        Plot basin location with state lines.
-        Input:
-            shape_geog - geopandas shape of basin in geographic coordinates.
-            states_fpath - python string for relative filepath to US States 
-                           shapefile.
-            proj_crs - python string for projected crs epgs.
-            showPlot - boolean to produce plot.  
-        Output:
-            plot of basins.
-    """
-    # read in other model predictions.
-    data_other = pd.read_csv('https://snow.water.ca.gov/service/plotly/data/download?dash=fcast_resources&file=csv/wsfr_snow.csv')
-    data_other['DATE'] = pd.to_datetime(data_other['DATE'])
-    # slice to basin.
-    sj_other = data_other[data_other['STA_ID'] == basinID]
-    sj_all = copy.deepcopy(sj_other)
-    # slice dates.
-    sj_other = sj_other[(sj_other['DATE'] >= np.datetime64(end_date + timedelta(days=-14))) & (sj_other['DATE'] <= np.datetime64(sheet2.Date.iloc[-1]))]
-    # sj_other = sj_other[(sj_other['DATE'] >= np.datetime64('2024-11-15')) & (sj_other['DATE'] <= np.datetime64(sheet2.Date.iloc[-1]))]
+# def plot_predicted_comparisons2(sheet1,sheet2,sheet3,sheet4,sheet5,sheet6,aso_site_name,end_date,ax_,
+#                                basinID = 'SBF',showPlot = True,savePlot = True):
+#     """
+#         Plot basin location with state lines.
+#         Input:
+#             shape_geog - geopandas shape of basin in geographic coordinates.
+#             states_fpath - python string for relative filepath to US States 
+#                            shapefile.
+#             proj_crs - python string for projected crs epgs.
+#             showPlot - boolean to produce plot.  
+#         Output:
+#             plot of basins.
+#     """
+#     # read in other model predictions.
+#     data_other = pd.read_csv('https://snow.water.ca.gov/service/plotly/data/download?dash=fcast_resources&file=csv/wsfr_snow.csv')
+#     data_other['DATE'] = pd.to_datetime(data_other['DATE'])
+#     # slice to basin.
+#     sj_other = data_other[data_other['STA_ID'] == basinID]
+#     sj_all = copy.deepcopy(sj_other)
+#     # slice dates.
+#     sj_other = sj_other[(sj_other['DATE'] >= np.datetime64(end_date + timedelta(days=-14))) & (sj_other['DATE'] <= np.datetime64(sheet2.Date.iloc[-1]))]
+#     # sj_other = sj_other[(sj_other['DATE'] >= np.datetime64('2024-11-15')) & (sj_other['DATE'] <= np.datetime64(sheet2.Date.iloc[-1]))]
 
-    # drop missing columns.
-    sj_other = sj_other.dropna(axis = 1,how = 'all')
+#     # drop missing columns.
+#     sj_other = sj_other.dropna(axis = 1,how = 'all')
 
-    # divide values by 1000.
-    col_names = sj_other.columns.to_list()
-    # remove columns names.
-    col_names.remove('DATE')
-    col_names.remove('STA_ID')
-    col_names.remove('STATION_NAME')
-    for col in ['ISNOBAL_DWR_SWE_AF','SNODAS_SWE_AF','SNOW17_SWE_AF','SWANN_UA_SWE_AF']:
-        sj_other[col] = sj_other[col]/1000
-    # create day of year index.
-    sj_other['day_of_year'] = sj_other['DATE'].dt.dayofyear
-    sj_other = sj_other.set_index('day_of_year')
+#     # divide values by 1000.
+#     col_names = sj_other.columns.to_list()
+#     # remove columns names.
+#     col_names.remove('DATE')
+#     col_names.remove('STA_ID')
+#     col_names.remove('STATION_NAME')
+#     for col in ['ISNOBAL_DWR_SWE_AF','SNODAS_SWE_AF','SNOW17_SWE_AF','SWANN_UA_SWE_AF']:
+#         sj_other[col] = sj_other[col]/1000
+#     # create day of year index.
+#     sj_other['day_of_year'] = sj_other['DATE'].dt.dayofyear
+#     sj_other = sj_other.set_index('day_of_year')
 
-    # create median dataframe.
-    snodas_df = sj_all[['DATE','SNODAS_SWE_AF']]
-    snodas_df = snodas_df[snodas_df['DATE'] < np.datetime64(end_date + timedelta(days=-14))]
-    snodas_df['day_of_year'] = snodas_df['DATE'].dt.dayofyear
-    median_df = snodas_df.groupby('day_of_year')[['SNODAS_SWE_AF']].median() / 1000
-    median_df = median_df.rename(columns = {'SNODAS_SWE_AF':'SNODAS_MEDIAN'})
-    # merge median
-    sj_other = pd.merge(sj_other,median_df,how = 'left',left_on = 'day_of_year',right_on = 'day_of_year')
-    # clean up sheet data.
-    sheet1['Date'] = pd.to_datetime(sheet1['Date'])
-    sheet2['Date'] = pd.to_datetime(sheet2['Date'])
-    sheet3['Date'] = pd.to_datetime(sheet3['Date'])
-    sheet4['Date'] = pd.to_datetime(sheet4['Date'])
-    sheet5['Date'] = pd.to_datetime(sheet5['Date'])
-    sheet6['Date'] = pd.to_datetime(sheet6['Date'])
+#     # create median dataframe.
+#     snodas_df = sj_all[['DATE','SNODAS_SWE_AF']]
+#     snodas_df = snodas_df[snodas_df['DATE'] < np.datetime64(end_date + timedelta(days=-14))]
+#     snodas_df['day_of_year'] = snodas_df['DATE'].dt.dayofyear
+#     median_df = snodas_df.groupby('day_of_year')[['SNODAS_SWE_AF']].median() / 1000
+#     median_df = median_df.rename(columns = {'SNODAS_SWE_AF':'SNODAS_MEDIAN'})
+#     # merge median
+#     sj_other = pd.merge(sj_other,median_df,how = 'left',left_on = 'day_of_year',right_on = 'day_of_year')
+#     # clean up sheet data.
+#     sheet1['Date'] = pd.to_datetime(sheet1['Date'])
+#     sheet2['Date'] = pd.to_datetime(sheet2['Date'])
+#     sheet3['Date'] = pd.to_datetime(sheet3['Date'])
+#     sheet4['Date'] = pd.to_datetime(sheet4['Date'])
+#     sheet5['Date'] = pd.to_datetime(sheet5['Date'])
+#     sheet6['Date'] = pd.to_datetime(sheet6['Date'])
 
-    nan_df_1 = sheet1[['Date','Total','Prediction QA','Training Infer NaNs']]
-    nan_df_2 = sheet3[['Date','Total','Prediction QA','Training Infer NaNs']]
-    nan_df_3 = sheet5[['Date','Total','Prediction QA','Training Infer NaNs']]
+#     nan_df_1 = sheet1[['Date','Total','Prediction QA','Training Infer NaNs']]
+#     nan_df_2 = sheet3[['Date','Total','Prediction QA','Training Infer NaNs']]
+#     nan_df_3 = sheet5[['Date','Total','Prediction QA','Training Infer NaNs']]
 
-    pred_df_1 = sheet2[['Date','Total','Prediction QA','Training Infer NaNs']]
-    pred_df_2 = sheet4[['Date','Total','Prediction QA','Training Infer NaNs']]
-    pred_df_3 = sheet6[['Date','Total','Prediction QA','Training Infer NaNs']]
+#     pred_df_1 = sheet2[['Date','Total','Prediction QA','Training Infer NaNs']]
+#     pred_df_2 = sheet4[['Date','Total','Prediction QA','Training Infer NaNs']]
+#     pred_df_3 = sheet6[['Date','Total','Prediction QA','Training Infer NaNs']]
 
-    df_nan__ = pd.concat([nan_df_1,nan_df_2,nan_df_3])
-    df_pred__ = pd.concat([pred_df_1,pred_df_2,pred_df_3])
-    df_nan__['Total'] = df_nan__['Total']/1000
-    df_pred__['Total'] = df_pred__['Total']/1000
-    df_sns = pd.concat([df_nan__,df_pred__])
-    df_sns = df_sns.rename(columns = {'Training Infer NaNs':'MLR Prediction'})
+#     df_nan__ = pd.concat([nan_df_1,nan_df_2,nan_df_3])
+#     df_pred__ = pd.concat([pred_df_1,pred_df_2,pred_df_3])
+#     df_nan__['Total'] = df_nan__['Total']/1000
+#     df_pred__['Total'] = df_pred__['Total']/1000
+#     df_sns = pd.concat([df_nan__,df_pred__])
+#     df_sns = df_sns.rename(columns = {'Training Infer NaNs':'MLR Prediction'})
 
-    df_sns = df_sns[(df_sns['Date'] >= np.datetime64(end_date + timedelta(days=-14)))]
-    # plotting.
-    # fig,ax = plt.subplots(dpi = 150)
-    g = sns.lineplot(ax=ax_,
-                 x = 'Date',
-                 y = 'Total',
-                 hue = 'MLR Prediction',
-                 style='MLR Prediction', 
-                 markers=['D', 'X'],
-                 data=df_sns,
-                 dashes = False,
-                 legend = True)
-    first_legend = ax_.legend(title = 'MLR Prediction',loc = 'upper left',title_fontproperties={'weight': 'bold'},)
-
-
-
-    l1 = ax_.plot(sj_other['DATE'],sj_other['ISNOBAL_DWR_SWE_AF'],color = 'C2',linestyle = '--',linewidth = 1)
-    l2 = ax_.plot(sj_other['DATE'],sj_other['SNODAS_SWE_AF'],color = 'C3',linestyle = '--',linewidth = 1)
-    l3 = ax_.plot(sj_other['DATE'],sj_other['SNOW17_SWE_AF'],color = 'C4',linestyle = '--',linewidth = 1)
-    l4 = ax_.plot(sj_other['DATE'],sj_other['SWANN_UA_SWE_AF'],color = 'C5',linestyle = '--',linewidth = 1)
-    l5 = ax_.plot(sj_other['DATE'],sj_other['SNODAS_MEDIAN'],color = 'black',linestyle = '-',linewidth = 2)
-
-    # Make sure to pass single Line2D objects rather than 1-element lists:
-    line1 = l1[0]
-    line2 = l2[0]
-    line3 = l3[0]
-    line4 = l4[0]
-    line5 = l5[0]
-
-    # Second legend
-    second_legend = ax_.legend(
-    handles=[line1, line2, line3, line4,line5],
-    labels=['ISNOBAL', 'SNODAS', 'SNOW17', 'SWANN','SNODAS_MEDIAN'],
-    loc='lower right',
-    title = 'Other Products',
-    title_fontproperties={'weight': 'bold'},  # makes the legend title bold
-    )
-
-    # Add *both* legends
-    ax_.add_artist(first_legend)
-    ax_.add_artist(second_legend)
-    ax_.set_ylabel('Basin Mean SWE [thousand acre-feet]',fontweight = 'bold')
-    # plt.xlabel('Date',fontweight = 'bold')
-    ax_.set_title('San Joaquin Total Basin Mean SWE Prediction',fontweight = 'bold')
-    ax_.set_xticks(rotation = 45)
-    # plt.ylim([0,1000])
-    plt.tight_layout()
-    if savePlot:
-        plt.savefig(f'./prediction_comparison.png',dpi = 150)
-    if showPlot:
-        plt.show()
+#     df_sns = df_sns[(df_sns['Date'] >= np.datetime64(end_date + timedelta(days=-14)))]
+#     # plotting.
+#     # fig,ax = plt.subplots(dpi = 150)
+#     g = sns.lineplot(ax=ax_,
+#                  x = 'Date',
+#                  y = 'Total',
+#                  hue = 'MLR Prediction',
+#                  style='MLR Prediction', 
+#                  markers=['D', 'X'],
+#                  data=df_sns,
+#                  dashes = False,
+#                  legend = True)
+#     first_legend = ax_.legend(title = 'MLR Prediction',loc = 'upper left',title_fontproperties={'weight': 'bold'},)
 
 
-    return ax_
+
+#     l1 = ax_.plot(sj_other['DATE'],sj_other['ISNOBAL_DWR_SWE_AF'],color = 'C2',linestyle = '--',linewidth = 1)
+#     l2 = ax_.plot(sj_other['DATE'],sj_other['SNODAS_SWE_AF'],color = 'C3',linestyle = '--',linewidth = 1)
+#     l3 = ax_.plot(sj_other['DATE'],sj_other['SNOW17_SWE_AF'],color = 'C4',linestyle = '--',linewidth = 1)
+#     l4 = ax_.plot(sj_other['DATE'],sj_other['SWANN_UA_SWE_AF'],color = 'C5',linestyle = '--',linewidth = 1)
+#     l5 = ax_.plot(sj_other['DATE'],sj_other['SNODAS_MEDIAN'],color = 'black',linestyle = '-',linewidth = 2)
+
+#     # Make sure to pass single Line2D objects rather than 1-element lists:
+#     line1 = l1[0]
+#     line2 = l2[0]
+#     line3 = l3[0]
+#     line4 = l4[0]
+#     line5 = l5[0]
+
+#     # Second legend
+#     second_legend = ax_.legend(
+#     handles=[line1, line2, line3, line4,line5],
+#     labels=['ISNOBAL', 'SNODAS', 'SNOW17', 'SWANN','SNODAS_MEDIAN'],
+#     loc='lower right',
+#     title = 'Other Products',
+#     title_fontproperties={'weight': 'bold'},  # makes the legend title bold
+#     )
+
+#     # Add *both* legends
+#     ax_.add_artist(first_legend)
+#     ax_.add_artist(second_legend)
+#     ax_.set_ylabel('Basin Mean SWE [thousand acre-feet]',fontweight = 'bold')
+#     # plt.xlabel('Date',fontweight = 'bold')
+#     ax_.set_title('San Joaquin Total Basin Mean SWE Prediction',fontweight = 'bold')
+#     ax_.set_xticks(rotation = 45)
+#     # plt.ylim([0,1000])
+#     plt.tight_layout()
+#     if savePlot:
+#         plt.savefig(f'./prediction_comparison.png',dpi = 150)
+#     if showPlot:
+#         plt.show()
+
+
+#     return ax_
 
 def plot_pillow_qa_timeline(
     ds_raw: "xr.Dataset",
