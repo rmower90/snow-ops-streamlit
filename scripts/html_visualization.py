@@ -253,7 +253,7 @@ if __name__ =="__main__":
     sm_df['Date'] = pd.to_datetime(sm_df['Date'])
 
     seasonal_dirs = ["season","accum","melt"]
-    models = ["COMMON_MASK"]
+    models = ["COMMON_MASK","SNOWMODEL_IMPUTE"]
 
     
     for aso_stack_type in models:

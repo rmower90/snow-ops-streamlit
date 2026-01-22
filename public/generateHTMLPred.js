@@ -1,21 +1,15 @@
-
 /**
- * generateHTMLPreds.js (drop-in)
+ * generateHTMLPred.js (drop-in)
  *
- * Usage:
- *   node generateHTMLPreds.js USCASJ [USCATM ...]
- *   node generateHTMLPreds.js USCASJ --dropTrainInfer="drop NaNs"
- *
- * What it does:
- *  - Recursively finds prediction_acreFt_wy*_combination.csv under ROOT/<BASIN>/
- *  - Infers modelName + seasonality from path segments
- *  - Picks lexicographically latest WY per (modelName, seasonality)
- *  - Reads last 2 rows from each CSV and concatenates into one table
- *  - Drops display columns in DROP_COLS
- *  - Optionally drops rows where "Training Infer NaNs" == --dropTrainInfer value
- *  - Appends a Timeseries image: <BASIN>_timeseries_plot.png
- *  - Writes <BASIN>.html into the same directory as this script (so relative image works)
- *  - If the PNG exists elsewhere under basinRoot, it copies it next to the HTML
+ * Edits:
+ * 1) Display name mapping in table:
+ *    - COMMON_MASK -> Pillow Impute
+ *    - SNOWMODEL_IMPUTE -> SnowModel Impute
+ * 2) Timeseries section title -> "Model Predictions Using Snow Pillow Imputation"
+ * 3) First plot file -> "<BASIN>_COMMON_MASK_timeseries_plot.png"
+ * 4) Add second plot underneath:
+ *    - label: "Model Predictions Using SnowModel Imputation"
+ *    - file: "<BASIN>_SNOWMODEL_IMPUTE_timeseries_plot.png"
  */
 
 const fs = require("fs");
@@ -45,6 +39,13 @@ const DROP_COLS = {
   "Training Infer NaNs": true,
 };
 
+// Display mapping for Model Name column
+function displayModelName(modelName) {
+  if (modelName === "COMMON_MASK") return "Pillow Impute";
+  if (modelName === "SNOWMODEL_IMPUTE") return "SnowModel Impute";
+  return modelName;
+}
+
 // --------------------------
 // Args
 // --------------------------
@@ -65,7 +66,7 @@ let basins = process.argv
 
 if (basins.length === 0) {
   console.error(
-    'Usage: node generateHTMLPreds.js USCASJ [USCATM ...] [--dropTrainInfer="drop NaNs"]'
+    'Usage: node generateHTMLPred.js USCASJ [USCATM ...] [--dropTrainInfer="drop NaNs"]'
   );
   process.exit(1);
 }
@@ -164,6 +165,8 @@ function walkDir(dirPath, fileCb, doneCb) {
 // Infer modelName & seasonality from path
 // Expected tree anywhere under basin root:
 //   .../<MODELNAME>/<seasonality>/acreFt/prediction_acreFt_wyXXXX_combination.csv
+// or:
+//   .../models/<MODELNAME>/<seasonality>/acreFt/prediction_acreFt_wyXXXX_combination.csv
 // --------------------------
 function inferModelAndSeasonality(csvPath) {
   var parts = csvPath.split(path.sep);
@@ -178,9 +181,8 @@ function inferModelAndSeasonality(csvPath) {
       var modelName = i > 0 ? parts[i - 1] : "UNKNOWN_MODEL";
 
       // If layout is .../<BASIN>/models/<MODEL>/<seasonality>/...
-      // then parts[i-2] will be "models"
       if (i > 1 && parts[i - 2] === "models") {
-        modelName = parts[i - 1]; // keep same, but this makes intent explicit
+        modelName = parts[i - 1];
       }
 
       return { modelName: modelName, seasonality: seasonality };
@@ -190,16 +192,13 @@ function inferModelAndSeasonality(csvPath) {
   return null;
 }
 
-
 // --------------------------
-// Timeseries PNG discovery
+// Timeseries PNG discovery (explicit filenames)
 // Priority:
 //  1) next to this JS file
 //  2) anywhere under basinRoot
 // --------------------------
-function findTimeseriesPng(basin, basinRoot, cb) {
-  var targetName = basin + "_timeseries_plot.png";
-
+function findNamedPng(targetName, basinRoot, cb) {
   var scriptDirCandidate = path.join(SCRIPT_DIR, targetName);
   fs.stat(scriptDirCandidate, function (err, st) {
     if (!err && st && st.isFile()) {
@@ -245,10 +244,9 @@ function buildHTMLForBasin(basin, basinRoot, cb) {
         return cb(new Error("No prediction CSVs found under: " + basinRoot));
       }
 
-      // Pick one CSV per (modelName, seasonality): choose lexicographically last filename
+      // Pick one CSV per (modelName, seasonality): prefer .../models/...; else lexicographically last filename
       var pickedMap = {};
       function isModelsPath(fp) {
-        // portable: check for path segment "models"
         return fp.split(path.sep).indexOf("models") > -1;
       }
 
@@ -262,7 +260,6 @@ function buildHTMLForBasin(basin, basinRoot, cb) {
 
         var cur = pickedMap[key];
 
-        // 1) Prefer anything under .../models/...
         var dIsModels = isModelsPath(d.csvPath);
         var curIsModels = isModelsPath(cur.csvPath);
 
@@ -274,19 +271,18 @@ function buildHTMLForBasin(basin, basinRoot, cb) {
           return;
         }
 
-        // 2) If both same type, fall back to lexicographically last filename
         if (path.basename(d.csvPath) > path.basename(cur.csvPath)) {
           pickedMap[key] = d;
         }
       });
 
-
       var picked = Object.keys(pickedMap).map(function (k) {
         return pickedMap[k];
       });
 
-      console.log(`[${basin}] picked CSVs:`);
-      picked.forEach(p => console.log("  ", p.modelName, p.seasonality, p.csvPath));  
+      // (Optional debug)
+      // console.log(`[${basin}] picked CSVs:`);
+      // picked.forEach(p => console.log("  ", p.modelName, p.seasonality, p.csvPath));
 
       var pending = picked.length;
       var results = []; // {modelName, seasonality, headerRaw, rows}
@@ -298,10 +294,6 @@ function buildHTMLForBasin(basin, basinRoot, cb) {
 
           if (!firstHeaderRaw) firstHeaderRaw = res.headerRaw;
 
-          const dateCol = res.headerRaw.indexOf("Date");
-          console.log(`[${basin}] ${item.modelName}/${item.seasonality} last two dates:`,
-            res.rows.map(r => r[dateCol]));
-
           results.push({
             modelName: item.modelName,
             seasonality: item.seasonality,
@@ -311,15 +303,30 @@ function buildHTMLForBasin(basin, basinRoot, cb) {
 
           pending--;
           if (pending === 0) {
-            findTimeseriesPng(basin, basinRoot, function (_err3, pngAbsPath) {
-              var html = renderConcatenatedTableHTML(
-                basin,
-                results,
-                firstHeaderRaw,
-                pngAbsPath,
-                dropTrainInferValue
-              );
-              cb(null, { html: html, pngAbsPath: pngAbsPath });
+            // NEW: find the two specific plots
+            var pillowPlotName = basin + "_COMMON_MASK_timeseries_plot.png";
+            var snowmodelPlotName = basin + "_SNOWMODEL_IMPUTE_timeseries_plot.png";
+
+            findNamedPng(pillowPlotName, basinRoot, function (_e1, pillowAbs) {
+              findNamedPng(snowmodelPlotName, basinRoot, function (_e2, snowmodelAbs) {
+                var html = renderConcatenatedTableHTML(
+                  basin,
+                  results,
+                  firstHeaderRaw,
+                  pillowPlotName,
+                  pillowAbs,
+                  snowmodelPlotName,
+                  snowmodelAbs,
+                  dropTrainInferValue
+                );
+                cb(null, {
+                  html: html,
+                  pillowPlotName: pillowPlotName,
+                  pillowAbsPath: pillowAbs,
+                  snowmodelPlotName: snowmodelPlotName,
+                  snowmodelAbsPath: snowmodelAbs,
+                });
+              });
             });
           }
         });
@@ -328,13 +335,14 @@ function buildHTMLForBasin(basin, basinRoot, cb) {
   );
 }
 
-
-
 function renderConcatenatedTableHTML(
   basin,
   results,
   headerRaw,
-  pngAbsPathOrNull,
+  pillowPlotRel,
+  pillowPlotAbsOrNull,
+  snowmodelPlotRel,
+  snowmodelPlotAbsOrNull,
   dropTrainInferValue
 ) {
   // Keep original headers except drops (DISPLAY only)
@@ -345,7 +353,7 @@ function renderConcatenatedTableHTML(
   // Final headers include new cols
   var finalHeaders = ["Model Name", "Seasonality"].concat(keepHeaders);
 
-  // header -> index map
+  // header -> index map (assumes consistent ordering; OK if your CSV headers match)
   var headerIndexMap = {};
   for (var i = 0; i < headerRaw.length; i++) headerIndexMap[headerRaw[i]] = i;
 
@@ -362,29 +370,28 @@ function renderConcatenatedTableHTML(
   });
 
   function parseYYYYMMDD(s) {
-  if (!s) return null;
-  var parts = String(s).trim().split("-");
-  if (parts.length !== 3) return null;
-  var y = parseInt(parts[0], 10);
-  var m = parseInt(parts[1], 10);
-  var d = parseInt(parts[2], 10);
-  if (!y || !m || !d) return null;
-  return new Date(Date.UTC(y, m - 1, d)); // UTC avoids local TZ shifts
+    if (!s) return null;
+    var parts = String(s).trim().split("-");
+    if (parts.length !== 3) return null;
+    var y = parseInt(parts[0], 10);
+    var m = parseInt(parts[1], 10);
+    var d = parseInt(parts[2], 10);
+    if (!y || !m || !d) return null;
+    return new Date(Date.UTC(y, m - 1, d)); // UTC avoids local TZ shifts
   }
-
 
   // Flatten all rows (with optional drop)
   var finalRows = [];
   results.forEach(function (block) {
     block.rows.forEach(function (row) {
-      // Optionally drop rows by Training Infer NaNs
       if (dropTrainInferValue && trainInferIdx !== undefined) {
         var v = row[trainInferIdx];
-        if ((v || "").trim() === dropTrainInferValue) return; // skip
+        if ((v || "").trim() === dropTrainInferValue) return;
       }
 
       var out = [];
-      out.push(block.modelName);
+      // Apply display mapping ONLY for table column
+      out.push(displayModelName(block.modelName));
       out.push(block.seasonality);
 
       for (var c = 0; c < keepHeaders.length; c++) {
@@ -397,30 +404,37 @@ function renderConcatenatedTableHTML(
   });
 
   // Determine the latest prediction date appearing in the table (based on CSV "Date" column)
-var dateIdx = headerIndexMap["Date"]; // this is the original CSV column index
-var latestDt = null;
+  var dateIdx = headerIndexMap["Date"];
+  var latestDt = null;
 
-results.forEach(function (block) {
-  block.rows.forEach(function (row) {
-    // Respect the same drop filter applied above
-    if (dropTrainInferValue && trainInferIdx !== undefined) {
-      var v = row[trainInferIdx];
-      if ((v || "").trim() === dropTrainInferValue) return;
-    }
+  results.forEach(function (block) {
+    block.rows.forEach(function (row) {
+      if (dropTrainInferValue && trainInferIdx !== undefined) {
+        var v = row[trainInferIdx];
+        if ((v || "").trim() === dropTrainInferValue) return;
+      }
 
-    var dt = parseYYYYMMDD(row[dateIdx]);
-    if (!dt) return;
-    if (!latestDt || dt.getTime() > latestDt.getTime()) latestDt = dt;
+      var dt = parseYYYYMMDD(row[dateIdx]);
+      if (!dt) return;
+      if (!latestDt || dt.getTime() > latestDt.getTime()) latestDt = dt;
+    });
   });
-});
 
-var formattedDate = latestDt
-  ? latestDt.toLocaleDateString("en-US", { year: "numeric", month: "long", day: "numeric", timeZone: "UTC" })
-  : new Date().toLocaleDateString("en-US", { year: "numeric", month: "long", day: "numeric" });
+  var formattedDate = latestDt
+    ? latestDt.toLocaleDateString("en-US", {
+        year: "numeric",
+        month: "long",
+        day: "numeric",
+        timeZone: "UTC",
+      })
+    : new Date().toLocaleDateString("en-US", {
+        year: "numeric",
+        month: "long",
+        day: "numeric",
+      });
 
-
-  var pngRel = basin + "_timeseries_plot.png";
-  var hasPng = !!pngAbsPathOrNull;
+  var hasPillowPng = !!pillowPlotAbsOrNull;
+  var hasSnowmodelPng = !!snowmodelPlotAbsOrNull;
 
   var html = [
     "<!DOCTYPE html>",
@@ -474,14 +488,35 @@ var formattedDate = latestDt
   html.push(
     "      </tbody>",
     "    </table>",
+
+    // Plot 1: Pillow impute
     '    <div class="timeseries">',
-    '      <h2 style="margin: 0 0 10px 0;">Timeseries</h2>',
-    hasPng
-      ? '      <img src="' + pngRel + '" alt="' + basin + ' timeseries plot" />'
+    '      <h2 style="margin: 0 0 10px 0;">Model Predictions Using Snow Pillow Imputation</h2>',
+    hasPillowPng
+      ? '      <img src="' +
+          pillowPlotRel +
+          '" alt="' +
+          basin +
+          ' Pillow Impute timeseries plot" />'
       : '      <div class="missing">Timeseries PNG not found: expected ' +
-          pngRel +
+          pillowPlotRel +
           "</div>",
     "    </div>",
+
+    // Plot 2: SnowModel impute
+    '    <div class="timeseries">',
+    '      <h2 style="margin: 0 0 10px 0;">Model Predictions Using SnowModel Imputation</h2>',
+    hasSnowmodelPng
+      ? '      <img src="' +
+          snowmodelPlotRel +
+          '" alt="' +
+          basin +
+          ' SnowModel Impute timeseries plot" />'
+      : '      <div class="missing">Timeseries PNG not found: expected ' +
+          snowmodelPlotRel +
+          "</div>",
+    "    </div>",
+
     "  </div>",
     "</body>",
     "</html>"
@@ -492,7 +527,7 @@ var formattedDate = latestDt
 
 // --------------------------
 // Run for each basin -> write <BASIN>.html into script directory
-// Ensure PNG is alongside HTML (copy if found elsewhere)
+// Ensure PNGs are alongside HTML (copy if found elsewhere)
 // --------------------------
 basins.forEach(function (basin) {
   var basinRoot = path.join(ROOT, basin);
@@ -504,7 +539,6 @@ basins.forEach(function (basin) {
     }
 
     var html = out.html;
-    var pngAbsPath = out.pngAbsPath;
 
     var outPath = path.join(OUT_DIR, basin + ".html");
     fs.writeFile(outPath, html, function (err2) {
@@ -513,37 +547,63 @@ basins.forEach(function (basin) {
         return;
       }
 
-      // Ensure PNG exists next to HTML
-      var pngName = basin + "_timeseries_plot.png";
-      var dstPng = path.join(OUT_DIR, pngName);
+      function ensurePngNextToHtml(pngRelName, pngAbsPathOrNull, done) {
+        var dstPng = path.join(OUT_DIR, pngRelName);
 
-      fs.stat(dstPng, function (eStat, st) {
-        if (!eStat && st && st.isFile()) {
-          console.log("[" + basin + "] Wrote " + outPath + " (PNG already present)");
-          return;
+        fs.stat(dstPng, function (eStat, st) {
+          if (!eStat && st && st.isFile()) return done(null, "already");
+
+          if (pngAbsPathOrNull) {
+            fs.copyFile(pngAbsPathOrNull, dstPng, function (err3) {
+              if (err3) return done(err3);
+              return done(null, "copied");
+            });
+          } else {
+            return done(null, "missing");
+          }
+        });
+      }
+
+      // Ensure both PNGs exist next to HTML
+      ensurePngNextToHtml(out.pillowPlotName, out.pillowAbsPath, function (e1, s1) {
+        if (e1) {
+          console.warn(
+            "[" +
+              basin +
+              "] Wrote " +
+              outPath +
+              " (Pillow PNG copy failed: " +
+              (e1.message || e1) +
+              ")"
+          );
         }
 
-        if (pngAbsPath) {
-          fs.copyFile(pngAbsPath, dstPng, function (err3) {
-            if (err3) {
-              console.warn(
-                "[" +
-                  basin +
-                  "] Wrote " +
-                  outPath +
-                  " (PNG copy failed: " +
-                  (err3.message || err3) +
-                  ")"
-              );
-            } else {
-              console.log("[" + basin + "] Wrote " + outPath + " + " + dstPng);
-            }
-          });
-        } else {
-          console.log("[" + basin + "] Wrote " + outPath + " (no PNG found)");
-        }
+        ensurePngNextToHtml(out.snowmodelPlotName, out.snowmodelAbsPath, function (e2, s2) {
+          if (e2) {
+            console.warn(
+              "[" +
+                basin +
+                "] Wrote " +
+                outPath +
+                " (SnowModel PNG copy failed: " +
+                (e2.message || e2) +
+                ")"
+            );
+          }
+
+          console.log(
+            "[" +
+              basin +
+              "] Wrote " +
+              outPath +
+              " (Pillow PNG: " +
+              s1 +
+              ", SnowModel PNG: " +
+              s2 +
+              ")"
+          );
+        });
       });
     });
   });
 });
-

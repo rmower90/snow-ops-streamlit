@@ -82,7 +82,7 @@ for basin in "${BASINS[@]}"; do
     python /home/rossamower/bin/mlr_prediction/html_visualization.py \
         $basin \
         2026 \
-        $current_dir
+        $script_dir
 
     # create html file.
     echo ""

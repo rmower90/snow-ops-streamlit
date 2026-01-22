@@ -94,34 +94,41 @@ def timeseries_pillow_selection(mlr_pred_lst: List,
 
     # plotting.
     fig,ax = plt.subplots(5,1,figsize=(10,10),sharex=False)
-    mlr_timeseries_plot(mlr_pred_lst,mlr_pred_dict,uaswe_m_df,snodas_m_df,start_date,end_date,ax[0])
+    mlr_timeseries_plot(mlr_pred_lst,mlr_pred_dict,uaswe_m_df,snodas_m_df,start_date,end_date,model_type,idx_mm,ax[0])
     
     for pil in unique_pils:
-        test_df[pil].plot(ax=ax[1],label = pil)
+        raw_df[pil].plot(ax=ax[1],label = pil)
     ax[1].legend()
-    ax[1].set_title('Pillow Observations',fontweight = 'bold')
+    ax[1].set_title('Pillow Observations - raw',fontweight = 'bold')
 
-    im = ax[2].imshow(
+    for pil in unique_pils:
+        test_df[pil].plot(ax=ax[2],label = pil)
+    ax[2].legend()
+    ax[2].set_title('Pillow Observations - clean',fontweight = 'bold')
+
+    im = ax[4].imshow(
         df_pil_mat.values,
         aspect="auto",
         interpolation="nearest",
         cmap = 'binary',
     )
-    ax[2].set_title('Pillow Selection (black = selected)',fontweight = 'bold')
+    ax[4].set_title('Pillow Selection (black = selected)',fontweight = 'bold')
+    # im = ax[4].imshow(
+    #     # nan_arr[::-1,:],
+    #     nan_arr,
+    #     aspect="auto",
+    #     interpolation="nearest",
+    #     cmap = 'binary'
+    # )
+    # ax[4].set_title('Non-NaN Observations (black = observed)',fontweight = 'bold')
     im = ax[3].imshow(
-        nan_arr[::-1,:],
+        # diff_arr[::-1,:],
+        diff_arr,
         aspect="auto",
         interpolation="nearest",
         cmap = 'binary'
     )
-    ax[3].set_title('Non-NaN Observations (black = observed)',fontweight = 'bold')
-    im = ax[4].imshow(
-        diff_arr[::-1,:],
-        aspect="auto",
-        interpolation="nearest",
-        cmap = 'binary'
-    )
-    ax[4].set_title('QA (black = Flagged)',fontweight = 'bold')
+    ax[3].set_title('QA (black = Flagged)',fontweight = 'bold')
     for i in range(0,5):
         if i == 4:
             ax[i].set_yticks(range(len(df_pil_mat.index)))
@@ -133,7 +140,7 @@ def timeseries_pillow_selection(mlr_pred_lst: List,
                 ha="right"
             )
             ax[i].set_xlabel('Date',fontweight = 'bold')
-        elif i <= 1:
+        elif i <=2:
             ax[i].set_ylabel('SWE [mm]',fontweight = 'bold')
             ax[i].set_xticks([])
             ax[i].set_xlabel('')
@@ -207,15 +214,22 @@ def mlr_timeseries_plot(
         snodas_m_df: pd.DataFrame,
         start_date: str,
         end_date: str,
+        model_type: str,
+        swe_index: int,
         ax):
     """
     """
     ax.plot(uaswe_m_df['Date'],uaswe_m_df['total']*1000,label='UASWE',color='black',linewidth=2,linestyle = '--')
     ax.plot(snodas_m_df['Date'],snodas_m_df['total']*1000,label='SNODAS',color='gray',linewidth=2,linestyle = '--')
-    mlr_tables[4][mlr_tables[4]['Training Infer NaNs'] == 'predict NaNs'].plot(ax=ax,x='Date',y='Basin',color = 'red',linewidth=2,label = 'MLR Prediction')
+    if model_type == 'season':
+        mlr_tables[swe_index][mlr_tables[swe_index]['Training Infer NaNs'] == 'predict NaNs'].plot(ax=ax,x='Date',y='Basin',color = 'C0',linewidth=2,label = 'MLR Prediction')
+    elif model_type == 'accum':
+        mlr_tables[swe_index][mlr_tables[swe_index]['Training Infer NaNs'] == 'predict NaNs'].plot(ax=ax,x='Date',y='Basin',color = 'C1',linewidth=2,label = 'MLR Prediction')
+    else:
+        mlr_tables[swe_index][mlr_tables[swe_index]['Training Infer NaNs'] == 'predict NaNs'].plot(ax=ax,x='Date',y='Basin',color = 'C2',linewidth=2,label = 'MLR Prediction')
 
     ax.legend()
-    ax.set_title(f'Model Predictions - {mlr_identifiers[5][1]}',fontweight = 'bold')
+    ax.set_title(f'Model Predictions - {model_type}',fontweight = 'bold')
     ax.set_xlim(np.datetime64(start_date),np.datetime64(end_date))
     return
     
