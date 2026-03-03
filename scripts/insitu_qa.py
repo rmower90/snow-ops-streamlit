@@ -448,12 +448,12 @@ if __name__ =="__main__":
         saveFIG = True,
         figDIR = f'{insitu_dir}qa/qa_viz_2026/'
     )
-
+    for pil in obs_data_test_ds.data_vars:
     # static
-    __ = plotting.plot_qa_method_diagnostics(
+        __ = plotting.plot_qa_method_diagnostics(
         ds_raw=obs_data_test_ds,
         df_detail=df_detail,
-        pillow="LLE",
+        pillow=pil,
         ds_qa=None,               # or None
         qa_method="static",
         pil_corr=pil_corr,
@@ -463,13 +463,13 @@ if __name__ =="__main__":
         majority_df_simple=df_simple,   # optional
         saveFIG = True,
         figDIR = f'{insitu_dir}qa/qa_method_diagnostics_2026/'
-    )
+        )
 
-    # voting
-    __ = plotting.plot_qa_method_diagnostics(
+        # voting
+        __ = plotting.plot_qa_method_diagnostics(
         ds_raw=obs_data_test_ds,
         df_detail=df_detail,
-        pillow="LLE",
+        pillow=pil,
         ds_qa=None, 
         qa_method="voting",
         start="2025-10-01",
@@ -477,13 +477,13 @@ if __name__ =="__main__":
         majority_df_simple=df_simple,
         saveFIG = True,
         figDIR = f'{insitu_dir}qa/qa_method_diagnostics_2026/'
-    )
+        )
 
-    # snowmodel (+ show best/second/third from test_ds)
-    __ = plotting.plot_qa_method_diagnostics(
+        # snowmodel (+ show best/second/third from test_ds)
+        __ = plotting.plot_qa_method_diagnostics(
         ds_raw=obs_data_test_ds,
         df_detail=df_detail,
-        pillow="LLE",
+        pillow=pil,
         ds_qa=None,
         qa_method="snowmodel",
         pred_ds=sm_test_ds,               # <<< optional; draws swed_best/second/third
@@ -492,7 +492,7 @@ if __name__ =="__main__":
         majority_df_simple=df_simple,
         saveFIG = True,
         figDIR = f'{insitu_dir}qa/qa_method_diagnostics_2026/'
-    )
+        )
 
     df_simple.to_csv(f'{insitu_dir}qa/insitu_qa_simple_wy_2026.csv',index = False)
     df_detail.to_csv(f'{insitu_dir}qa/insitu_qa_detail_wy_2026.csv',index = False)

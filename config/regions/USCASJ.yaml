@@ -50,4 +50,4 @@ pillow_api:
     name: LEAVITT LAKE
     network: snotel
     id: LLE
-  exclude_pillows: [KUP]
+  exclude_pillows: []

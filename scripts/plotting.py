@@ -5,6 +5,8 @@ import pandas as pd
 import matplotlib.pyplot as plt
 from typing import List, Dict
 import numpy as np
+import matplotlib.patches as mpatches
+from matplotlib.patches import Rectangle
 
 
 def timeseries_pillow_selection(mlr_pred_lst: List,
@@ -234,35 +236,245 @@ def mlr_timeseries_plot(
     return
     
 
+def visualize_pillow_selection_heatmap(
+    mlr_tables: list,
+    mlr_identifiers: dict,
+    start_date: str = None,
+    end_date: str = None,
+    train_infer: str = 'predict NaNs',
+    figsize: tuple = (16, 8),
+    ax=None,
+):
+    """
+    Create a unified heatmap showing which pillows were selected by which models across time.
+    
+    Parameters:
+    -----------
+    mlr_tables : list
+        List of MLR prediction dataframes
+    mlr_identifiers : dict
+        Dictionary mapping indices to [aso_stack_type, seasonal_dir, data_type]
+    start_date : str, optional
+        Start date for visualization (format: 'YYYY-MM-DD')
+    end_date : str, optional
+        End date for visualization (format: 'YYYY-MM-DD')
+    train_infer : str
+        Filter for 'Training Infer NaNs' column
+    figsize : tuple
+        Figure size (width, height)
+    ax : matplotlib.axes.Axes, optional
+        Axes object to draw the plot onto, otherwise a new figure and axes are created.
+    
+    Returns:
+    --------
+    fig, ax : matplotlib figure and axes objects
+    """
+
+    
+    # Find indices for each model type (pillows only)
+    model_indices = {}
+    for idx, (stack_type, seasonal_dir, data_type) in mlr_identifiers.items():
+        if seasonal_dir in ['season', 'accum', 'melt'] and data_type == 'pillows':
+            model_indices[seasonal_dir] = idx
+    
+    model_order = ['season', 'accum', 'melt']
+    
+    # Collect all pillow selections for each model
+    all_selections = {}
+    all_dates = set()
+    all_pillows = set()
+    
+    for model_type in model_order:
+        if model_type not in model_indices:
+            continue
+        
+        pil_idx = model_indices[model_type]
+        pil_df = mlr_tables[pil_idx][mlr_tables[pil_idx]['Training Infer NaNs'] == train_infer].copy()
+        
+        if start_date:
+            pil_df = pil_df[pil_df['Date'] >= np.datetime64(start_date)]
+        if end_date:
+            pil_df = pil_df[pil_df['Date'] <= np.datetime64(end_date)]
+        
+        # Parse pillow selections
+        df_pil = pil_df[['Date', 'Basin']].copy()
+        df_pil["Date"] = pd.to_datetime(df_pil["Date"])
+        df_pil["Pillow"] = df_pil["Basin"].str.split(r"\s*,\s*")
+        
+        # Explode to long format
+        df_long = df_pil.explode("Pillow")[["Date", "Pillow"]]
+        
+        if len(df_long) > 0:
+            all_selections[model_type] = df_long
+            all_dates.update(df_long['Date'].unique())
+            all_pillows.update(df_long['Pillow'].unique())
+    
+    # Create sorted lists
+    sorted_dates = sorted(list(all_dates))
+    sorted_pillows = sorted(list(all_pillows))
+    
+    # Create a 2D matrix: pillows x dates
+    # Values: 0=none, 1=season, 2=accum, 3=melt, 4=season+accum, 5=season+melt, 6=accum+melt, 7=all three
+    n_pillows = len(sorted_pillows)
+    n_dates = len(sorted_dates)
+    
+    # Model encoding
+    model_encoding = {'season': 1, 'accum': 2, 'melt': 4}
+    
+    # Initialize matrix
+    selection_matrix = np.zeros((n_pillows, n_dates), dtype=int)
+    
+    # Fill matrix with bitwise OR for overlapping selections
+    for model_type, df_long in all_selections.items():
+        model_val = model_encoding[model_type]
+        for _, row in df_long.iterrows():
+            pil_idx = sorted_pillows.index(row['Pillow'])
+            date_idx = sorted_dates.index(row['Date'])
+            selection_matrix[pil_idx, date_idx] |= model_val
+    
+    # Define colors for each model
+    color_season = 'C0'  # blue
+    color_accum = 'C1'   # orange
+    color_melt = 'C2'    # green
+    color_white = 'white'
+    
+    # Create figure
+    if ax is None:
+        fig, ax = plt.subplots(figsize=figsize)
+    else:
+        fig = ax.figure
+    
+    # Draw rectangles - divide each cell into thirds (vertically stacked)
+    # Top third = season, middle third = accum, bottom third = melt
+    
+    for i in range(n_pillows):
+        for j in range(n_dates):
+            val = selection_matrix[i, j]
+            if val == 0:
+                continue  # Skip empty cells
+            
+            # Determine which models selected this pillow on this date
+            # Season=1, Accum=2, Melt=4
+            has_season = (val & 1) > 0
+            has_accum = (val & 2) > 0
+            has_melt = (val & 4) > 0
+            
+            # Draw top third (season)
+            rect_season = Rectangle((j - 0.5, i - 0.5 + 2/3), 1, 1/3, 
+                           facecolor=color_season if has_season else color_white, 
+                           edgecolor='gray',
+                           linewidth=0.5,
+                           linestyle='--')
+            ax.add_patch(rect_season)
+            
+            # Draw middle third (accum)
+            rect_accum = Rectangle((j - 0.5, i - 0.5 + 1/3), 1, 1/3, 
+                           facecolor=color_accum if has_accum else color_white, 
+                           edgecolor='gray',
+                           linewidth=0.5,
+                           linestyle='--')
+            ax.add_patch(rect_accum)
+            
+            # Draw bottom third (melt)
+            rect_melt = Rectangle((j - 0.5, i - 0.5), 1, 1/3, 
+                           facecolor=color_melt if has_melt else color_white, 
+                           edgecolor='gray',
+                           linewidth=0.5,
+                           linestyle='--')
+            ax.add_patch(rect_melt)
+    
+    # Add gridlines
+    # Horizontal gridlines (black) separating pillows
+    for i in range(n_pillows + 1):
+        ax.axhline(y=i - 0.5, color='black', linewidth=1.5, zorder=10)
+    
+    # Vertical gridlines (gray) separating days
+    for j in range(n_dates + 1):
+        ax.axvline(x=j - 0.5, color='gray', linewidth=0.5, zorder=10)
+    
+    # Set axis limits and appearance
+    ax.set_xlim(-0.5, n_dates - 0.5)
+    ax.set_ylim(-0.5, n_pillows - 0.5)
+    ax.invert_yaxis()  # Invert y-axis so first pillow is at top
+    
+    # Set y-axis (pillows)
+    ax.set_yticks(range(n_pillows))
+    ax.set_yticklabels(sorted_pillows, fontsize=10)
+    ax.set_ylabel('Pillow', fontweight='bold', fontsize=12)
+    
+    # Set x-axis (dates)
+    step = max(1, n_dates // 20)  # Show ~20 tick labels
+    xticks = list(range(0, n_dates, step))
+    ax.set_xticks(xticks)
+    date_labels = [pd.Timestamp(sorted_dates[i]).strftime("%m-%d") for i in xticks]
+    ax.set_xticklabels(date_labels, rotation=45, ha='right', fontsize=9)
+    ax.set_xlabel('Date', fontweight='bold', fontsize=12)
+    
+    # Create legend with color patches
+    legend_elements = [
+        mpatches.Patch(facecolor=color_season, edgecolor='gray', linestyle='--', label='season'),
+        mpatches.Patch(facecolor=color_accum, edgecolor='gray', linestyle='--', label='accum'),
+        mpatches.Patch(facecolor=color_melt, edgecolor='gray', linestyle='--', label='melt'),
+    ]
+    ax.legend(handles=legend_elements, loc='upper left', bbox_to_anchor=(1.02, 1), 
+              fontsize=10, frameon=True)
+    
+    ax.set_title('Pillow Selection', fontweight='bold', fontsize=14, pad=10)
+    
+    # plt.tight_layout()
+    
+    return fig, ax
+
 def html_timeseries_plot(
     mlr_lst: List,
     mlr_ids: Dict,
     uaswe_df: pd.DataFrame,
+    uaswe_provisional_df: pd.DataFrame,
     snodas_df: pd.DataFrame,
     sm_df: pd.DataFrame,
     basin: str,
+    current_dates: np.ndarray,
+    current_swe: np.ndarray,
     plotDir: str = None,
     model_name: str = None,
     train_infer: str = 'predict NaNs',
     saveFIG: bool = True,
+    ax=None,
+    start_date: str = '2026-01-01', 
+    end_date: str = None,
 ):
-    fig, ax = plt.subplots(dpi=200, sharex=True, figsize=(10, 6))
+    if ax is None:
+        fig, ax = plt.subplots(dpi=200, sharex=True, figsize=(10, 6))
+        own_fig = True
+    else:
+        fig = ax.get_figure()
+        own_fig = False
 
     # --- BASE MODEL PREDICTIONS ---
     l1, = ax.plot(
         uaswe_df['Date'], uaswe_df['total'] / 1000,
-        label='UASWE', color='black', linestyle='--'
+        label='UASWE Early', color='black', linestyle='--'
     )
     l2, = ax.plot(
+        uaswe_provisional_df['Date'], uaswe_provisional_df['total'] / 1000,
+        label='UASWE Provisional', color='black', linestyle=':'
+    )
+    l3, = ax.plot(
         snodas_df['Date'], snodas_df['total'] / 1000,
         label='SNODAS', color='gray', linestyle='--'
     )
-    l3, = ax.plot(
+    l4, = ax.plot(
         sm_df['Date'], sm_df['total'] / 1000,
         label='SnowModel', color='brown', linestyle='--'
     )
+    
+    # Current SWE scatter plot
+    l5 = ax.scatter(
+        current_dates, current_swe / 1000,
+        label='ASO', color='purple', s=200, marker = u'$\u2744$'
+    )
 
-    model_handles = [l1, l2, l3]
+    model_handles = [l1, l2, l3, l4, l5]
 
     # --- MLR PREDICTIONS ---
     mlr_handles = []
@@ -285,40 +497,67 @@ def html_timeseries_plot(
             mlr_labels.append(f"MLR {mlr_id[1]}")
 
     # --- FIRST LEGEND (MLR models — TOP) ---
-    leg1 = ax.legend(
-        handles=mlr_handles,
-        labels=mlr_labels,
-        title='MLR Predictions',
-        loc='upper left',
-        bbox_to_anchor=(1.02, 1.0),
-        title_fontproperties={'weight': 'bold'}
-    )
-    ax.add_artist(leg1)
+    # Adjust legend position based on whether we own the figure
+    if own_fig:
+        # Place legends outside the axes (original behavior)
+        leg1 = ax.legend(
+            handles=mlr_handles,
+            labels=mlr_labels,
+            title='MLR Predictions',
+            loc='upper left',
+            bbox_to_anchor=(1.02, 1.0),
+            title_fontproperties={'weight': 'bold'}
+        )
+        ax.add_artist(leg1)
 
-    # --- SECOND LEGEND (Base models — BOTTOM) ---
-    ax.legend(
-        handles=model_handles,
-        title='Model Predictions',
-        loc='lower left',
-        bbox_to_anchor=(1.02, 0.0),
-        title_fontproperties={'weight': 'bold'}
-    )
+        # --- SECOND LEGEND (Base models — BOTTOM) ---
+        ax.legend(
+            handles=model_handles,
+            title='Model Predictions',
+            loc='lower left',
+            bbox_to_anchor=(1.02, 0.0),
+            title_fontproperties={'weight': 'bold'}
+        )
+    else:
+        # Place legends inside the axes to avoid overlap with other subplots
+        leg1 = ax.legend(
+            handles=mlr_handles,
+            labels=mlr_labels,
+            title='MLR Predictions',
+            loc='upper right',
+            fontsize=8,
+            title_fontproperties={'weight': 'bold', 'size': 9}
+        )
+        ax.add_artist(leg1)
+
+        # --- SECOND LEGEND (Base models — BOTTOM) ---
+        ax.legend(
+            handles=model_handles,
+            title='Model Predictions',
+            loc='lower right',
+            fontsize=8,
+            title_fontproperties={'weight': 'bold', 'size': 9}
+        )
 
     ax.set_ylabel('Mean SWE [thousand acre-feet]', fontweight='bold')
     ax.set_xlabel('Date', fontweight='bold')
-    ax.set_title(f'Basin Mean SWE Prediction', fontweight='bold')
-    ax.set_xlim(np.datetime64('2026-01-01'),None)
+    ax.set_title(f'Basin Mean SWE Prediction', fontweight='bold', fontsize=14, pad=10)
+    ax.set_xlim(np.datetime64(start_date) if start_date else None, np.datetime64(end_date) if end_date else None)
 
-    # Make room for legends on the right
-    fig.subplots_adjust(right=0.75)
+    # Make room for legends on the right (only if we created the figure)
+    if own_fig:
+        fig.subplots_adjust(right=0.75)
 
-    if saveFIG:
-        print(plotDir)
-        plt.savefig(f'{plotDir}/{basin}_{model_name}_timeseries_plot.png', dpi=200, bbox_inches='tight')
-    else:
-        plt.show()
+    # if saveFIG:
+    #     print(plotDir)
+    #     plt.savefig(f'{plotDir}/{basin}_{model_name}_timeseries_plot.png', dpi=200, bbox_inches='tight')
+    # else:
+    #     if own_fig:
+    #         plt.show()
 
-    plt.close(fig)
+    # if own_fig:
+    #     plt.show()
+    #     plt.close(fig)
     return
 
 
