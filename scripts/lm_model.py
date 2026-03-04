@@ -170,6 +170,135 @@ def run_all_mlr_models(aso_tseries_1,obs_data_hist,current_vals_df,aso_site_name
     # return summary_dict_all,df_split,yhat_mm,df_sheet_mm_lst,df_sheet_acreFt_lst,df_sheet_lst_rmse,df_train,yhat_test,aso_tseries_2,obs_data_6
     return summary_dict_all,df_sheet_mm_lst,df_sheet_acreFt_lst,df_sheet_pillow_lst
 
+
+def train_all_mlr_models(aso_tseries_1, obs_data_hist, aso_site_name, all_pils, all_pils_QA,
+                         df_sum_total, baseline_pils, start_wy, end_wy, isSplit, isAccum,
+                         prediction_dir, prediction_date, dem_bin, QA_flag='NA',
+                         modelNUM=None, isMean=False, showOutput=False,
+                         saveValidation=False, isCombination_=False,
+                         pillowImputation_=True, ds_snowmodel_=None):
+    """
+    Run cross-validation and station selection once for all (isImpute, elev_band) combos.
+    Returns cached training artifacts that can be reused for daily predictions via
+    predict_with_cached_training().
+
+    Parameters are the same as run_all_mlr_models minus current_vals_df, labels_from_yaml,
+    saveModels, pickledir, add_zeroASO (not needed during training).
+
+    Returns
+    -------
+    list[dict] : One entry per (isImpute, elev_band) combination, each containing:
+        'df_split'            - training DataFrame
+        'summary_dict_model'  - validation statistics and model metadata
+        'selected_pils'       - list of selected pillow station IDs
+        'area_m2'             - basin area in m2 for the elevation band
+        'modelID'             - unique integer model identifier
+    """
+    if modelNUM is None:
+        modelID = 0
+    else:
+        modelID = modelNUM
+
+    training_cache = []
+
+    for isImpute in [False, True]:
+        if showOutput: print('Impute', isImpute)
+
+        for elev_band in range(0, len(aso_tseries_1.elev)):
+            if showOutput: print('Elev', elev_band)
+
+            df_split, summary_dict_model, aso_tseries_2, obs_data_6, rmse = run_mlr_train_predict(
+                aso_tseries_1, obs_data_hist, elev_band, all_pils, all_pils_QA, df_sum_total,
+                baseline_pils, start_wy, end_wy, aso_site_name, isSplit, isAccum, isImpute,
+                isMean, prediction_date, modelID, QA_flag, model_type='MLR',
+                showOutput=showOutput, isCombination=isCombination_,
+                saveValidation=saveValidation, pillowImputation=pillowImputation_,
+                ds_model=ds_snowmodel_)
+
+            selected_pils = summary_dict_model[modelID]['model_features']['features']
+            if showOutput: print('elev_band', elev_band, 'selected_pils', selected_pils)
+
+            elev_vals = dem_bin[elev_band].values.flatten()
+            count = len(elev_vals[~np.isnan(elev_vals)])
+            area_m2 = count * 50 * 50
+
+            training_cache.append({
+                'df_split': df_split,
+                'summary_dict_model': summary_dict_model,
+                'selected_pils': selected_pils,
+                'area_m2': area_m2,
+                'modelID': modelID,
+            })
+            modelID += 1
+
+    return training_cache
+
+
+def predict_with_cached_training(training_cache, current_vals_df, prediction_date,
+                                 labels_from_yaml, add_zeroASO=True, pickledir=None):
+    """
+    Use cached training state to make predictions for a single day.
+
+    Parameters
+    ----------
+    training_cache : list[dict]
+        Output from train_all_mlr_models().
+    current_vals_df : pd.DataFrame
+        Current day pillow values with 'time' column.
+    prediction_date : datetime
+        Date of prediction.
+    labels_from_yaml : list[str]
+        Elevation bin labels from region config.
+    add_zeroASO : bool
+        Whether to add a zero-ASO training point for final regression.
+    pickledir : str or None
+        Optional directory for model pickle output.
+
+    Returns
+    -------
+    tuple : (summary_dict_all, df_sheet_mm_lst, df_sheet_acreFt_lst, df_sheet_pillow_lst)
+    """
+    summary_dict_all = {}
+    n_elev = len(training_cache) // 2  # two imputation modes (False, True)
+
+    df_sheet_mm_lst = []
+    df_sheet_acreFt_lst = []
+    df_sheet_pillow_lst = []
+
+    for idx, cached in enumerate(training_cache):
+        summary_dict_model = copy.deepcopy(cached['summary_dict_model'])
+        modelID = cached['modelID']
+
+        # Update date metadata to current prediction date
+        summary_dict_model[modelID]['model_features']['date'] = str(prediction_date)
+
+        # predictions in mm
+        yhat_mm, df_train, yhat_test = run_daily_prediction(
+            cached['df_split'], current_vals_df, cached['selected_pils'],
+            modelID, conversion=0, area_m2=cached['area_m2'],
+            outdir=pickledir, add_zeroASO=add_zeroASO)
+        # predictions in acre ft
+        yhat_acreft, df_train, yhat_test = run_daily_prediction(
+            cached['df_split'], current_vals_df, cached['selected_pils'],
+            modelID, conversion=2, area_m2=cached['area_m2'],
+            outdir=pickledir, add_zeroASO=add_zeroASO)
+
+        summary_dict_model[modelID]['prediction']['mm'].append(float(yhat_mm))
+        summary_dict_model[modelID]['prediction']['acre_ft'].append(float(yhat_acreft))
+        summary_dict_all = {**summary_dict_all, **summary_dict_model}
+
+        # After each imputation mode's elevation bands, create sheets
+        if (idx + 1) % n_elev == 0:
+            df_sheet_mm = create_prediction_sheet(summary_dict_all, modelID, labels_from_yaml, 'mm')
+            df_sheet_acreFt = create_prediction_sheet(summary_dict_all, modelID, labels_from_yaml, 'acre_ft')
+            df_pillow_sheet = create_pillow_sheet(summary_dict_all, modelID, labels_from_yaml)
+            df_sheet_mm_lst.append(df_sheet_mm)
+            df_sheet_acreFt_lst.append(df_sheet_acreFt)
+            df_sheet_pillow_lst.append(df_pillow_sheet)
+
+    return summary_dict_all, df_sheet_mm_lst, df_sheet_acreFt_lst, df_sheet_pillow_lst
+
+
 def process_melt_accum_thresh(thresh_fpath,df_sum_total,elev_bin,isAccum):
     """
     Slice data based on accumulation / melt threshold for each year.

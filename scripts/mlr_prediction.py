@@ -305,13 +305,19 @@ if __name__ =="__main__":
 
     start = time.time()
 
-    for t_idx in range(1,obs_data_test_lst[0].time.shape[0]):
-    # print('num timesteps:', obs_data_test_lst[0].time.shape[0])
-    # print('last timestep:', obs_data_test_lst[0].time[-1].values)
-    # for t_idx in range(1,2):
+    # Cache training results keyed by unique pillow availability sets.
+    # Training (cross-validation + station selection) only depends on which
+    # pillows are available, not on the day's actual SWE values, so we can
+    # reuse training results for all days that share the same pillow set.
+    training_model_cache = {}
+
+    n_timesteps = obs_data_test_lst[0].time.shape[0]
+    print(f'num timesteps: {n_timesteps - 1}')
+    print(f'last timestep: {obs_data_test_lst[0].time[-1].values}')
+
+    for t_idx in range(1, n_timesteps):
         current_date_np = obs_data_test_lst[0].time[t_idx].values
         current_date = datetime(pd.to_datetime(current_date_np).year,pd.to_datetime(current_date_np).month,pd.to_datetime(current_date_np).day)
-    
 
         current_vals_df,all_pils_QA,baseline_pils_,df_qa_table = preprocessing.process_daily_qa(
                                                                    t_idx,
@@ -322,13 +328,23 @@ if __name__ =="__main__":
                                                                    printOutput = showOutput,
                                                                               )
 
+        # Cache key: training depends only on which pillows are available
+        cache_key = (frozenset(all_pils_QA), frozenset(baseline_pils_))
+        if cache_key not in training_model_cache:
+            print(f'  Training models for new pillow set (n_QA={len(all_pils_QA)}, n_baseline={len(baseline_pils_)})...')
+            training_model_cache[cache_key] = lm_model.train_all_mlr_models(
+                aso_tseries_train.aso_swe, obs_data_qa, aso_site_name, all_pils, all_pils_QA,
+                df_sum_total, baseline_pils_, start_wy, end_wy, isSplit, isAccum,
+                mlrPred_dir, current_date, dem_bin.dem_bin, QA_flag=QA_flag,
+                modelNUM=model_num, isMean=False, showOutput=showOutput,
+                saveValidation=False, isCombination_=isCombination,
+                pillowImputation_=pillowImputation_, ds_snowmodel_=sm_train_ds)
+
         try:
-            summary_dict_all,df_sheet_lst_mm,df_sheet_lst_acreFt,df_sheet_pillow_lst = lm_model.run_all_mlr_models(aso_tseries_train.aso_swe,obs_data_qa,current_vals_df.reset_index(names = 'time'),
-                                                    aso_site_name,all_pils,all_pils_QA,df_sum_total,baseline_pils_,start_wy,end_wy,isSplit,isAccum,
-                                                    mlrPred_dir,current_date,dem_bin.dem_bin,elev_bin_labels,QA_flag=QA_flag,
-                                                    modelNUM = model_num,isMean = False,saveModels = False,showOutput = showOutput,
-                                                    saveValidation = False,pickledir = None,add_zeroASO = True,isCombination_ = isCombination,
-                                                    pillowImputation_ = pillowImputation_,ds_snowmodel_ = sm_train_ds,
+            summary_dict_all,df_sheet_lst_mm,df_sheet_lst_acreFt,df_sheet_pillow_lst = lm_model.predict_with_cached_training(
+                                                    training_model_cache[cache_key],
+                                                    current_vals_df.reset_index(names = 'time'),
+                                                    current_date, elev_bin_labels,
                                                     )
 
             prediction_mm_df,prediction_acreFt_df,prediction_pillow_df = postprocessing.arrange_prediction_tables(df_sheet_lst_mm,
