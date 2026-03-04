@@ -298,12 +298,8 @@ def run_mlr_train_predict(aso_tseries_1,obs_data_hist,elev_band,all_pils,all_pil
 
             # predictions_bestfit, predictions_validation, stations2, aso_tseries_2, obs_data_6 = run_cross_val_selection(obs_data_5_,df_summary_impute,aso_tseries_1,pils_removed,start_wy,end_wy,
             #                                                                                                              elev_band,isCombination = isCombination,showOutput = showOutput,isMelt = isSplit)
-            print('here')
             predictions_allpils, aso_vals, predictions_validation1, predictions_validation2,predictions_bestfit, stations2, aso_tseries_2, obs_data_6 = run_cross_val_selection2(obs_data_5_,df_summary_impute,aso_tseries_1,pils_removed,start_wy,end_wy,
                                                                                                                      elev_band,isCombination = isCombination,showOutput = showOutput,isMelt = isSplit)
-            print('here')
-            print(aso_vals.shape)
-            print(aso_tseries_2.shape)
         else:
             # predictions_bestfit, predictions_validation, stations2, aso_tseries_2, obs_data_6 = run_cross_val_selection(obs_data_hist,df_sum_total,aso_tseries_1,baseline_pils,start_wy,end_wy, 
             #                                                                                                              elev_band,isCombination = isCombination,showOutput = showOutput,isMelt = isSplit)
@@ -601,13 +597,10 @@ def run_cross_val_selection2(obs_data,df_sum_total,aso_tseries,all_pillows,start
 
     ## slice for melt or accum ##
     if isMelt:
-        print('slicing for melt')
         aso_tseries = aso_tseries[aso_tseries.date.isin(df_sum_total.time.values)]
 
     ## identify missing times ##
     missing_times = df_sum_total[df_sum_total[all_pillows].isnull().sum(axis=1) > 0].time.values
-    print('all pillows',all_pillows)
-    print('missing times',missing_times)
 
     ## slice aso mean swe ##
     aso_tseries_2 = aso_tseries[~aso_tseries.date.isin(missing_times)]
@@ -856,7 +849,6 @@ def fit_best_model(x,y, x_hat,y_hat, max_params=None):
         # print(f'{new_parameters},{error:.2f}')
 
     if len(parameters)==0:
-        print('HERE')
         return None, None, None
         # raise ValueError("0 parameters not allowed")
     

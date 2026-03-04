@@ -306,6 +306,9 @@ if __name__ =="__main__":
     start = time.time()
 
     for t_idx in range(1,obs_data_test_lst[0].time.shape[0]):
+    # print('num timesteps:', obs_data_test_lst[0].time.shape[0])
+    # print('last timestep:', obs_data_test_lst[0].time[-1].values)
+    # for t_idx in range(1,2):
         current_date_np = obs_data_test_lst[0].time[t_idx].values
         current_date = datetime(pd.to_datetime(current_date_np).year,pd.to_datetime(current_date_np).month,pd.to_datetime(current_date_np).day)
     
