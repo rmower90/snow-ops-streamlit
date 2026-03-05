@@ -435,6 +435,7 @@ def html_timeseries_plot(
     basin: str,
     current_dates: np.ndarray,
     current_swe: np.ndarray,
+    uaswe_snowtrax_df: pd.DataFrame = None,
     plotDir: str = None,
     model_name: str = None,
     train_infer: str = 'predict NaNs',
@@ -459,6 +460,11 @@ def html_timeseries_plot(
         uaswe_provisional_df['Date'], uaswe_provisional_df['total'] / 1000,
         label='UASWE Provisional', color='black', linestyle=':'
     )
+    if uaswe_snowtrax_df is not None:
+        l2_, = ax.plot(
+            uaswe_snowtrax_df['DATE'], uaswe_snowtrax_df['SWANN_UA_SWE_AF'] / 1000,
+            label='UASWE SnowTrax', color='black', linestyle='-.'
+        )
     l3, = ax.plot(
         snodas_df['Date'], snodas_df['total'] / 1000,
         label='SNODAS', color='gray', linestyle='--'
@@ -474,7 +480,10 @@ def html_timeseries_plot(
         label='ASO', color='purple', s=200, marker = u'$\u2744$'
     )
 
-    model_handles = [l1, l2, l3, l4, l5]
+    if uaswe_snowtrax_df is not None:
+        model_handles = [l1, l2, l2_, l3, l4, l5]
+    else:
+        model_handles = [l1, l2, l3, l4, l5]
 
     # --- MLR PREDICTIONS ---
     mlr_handles = []

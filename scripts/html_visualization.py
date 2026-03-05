@@ -274,6 +274,25 @@ def get_default_settings():
     elev_band = user_elevation_interval
     return model_num,isMean,isCombination,prediction_mm_df,prediction_acreFt_df,prediction_pillow_df,user_qa_level,elev_band, QA_flag
 
+def load_snowtrax_uaswe(aso_site_name: str,
+                        water_year: int):
+    snowtrax_url = 'https://snow.water.ca.gov/service/plotly/data/download?dash=fcast_resources&file=csv/wsfr_snow.csv'
+    basin_dict = {'USCASJ': 'SBF',
+                  'USCATM': 'TLG',
+                  'USCATR': 'TRF'}
+    if aso_site_name not in basin_dict.keys():
+        raise ValueError(f"ASO site name {aso_site_name} not found in basin dictionary.")
+    
+    snowtrax_df = pd.read_csv(snowtrax_url)
+    basin_df = snowtrax_df[snowtrax_df['STA_ID'] == basin_dict[aso_site_name]]
+    basin_df['DATE'] = pd.to_datetime(basin_df['DATE'])
+    basin_df.set_index('DATE', inplace=True)
+
+    basin_wy = basin_df.loc[f'{water_year-1}-10-01':, 'SWANN_UA_SWE_AF']
+
+
+    return basin_wy.reset_index()
+
 
 
 if __name__ =="__main__":
@@ -351,6 +370,12 @@ if __name__ =="__main__":
     uaswe_df = pd.read_csv(f'{uaswe_dir}mean_swe_uaswe_acreFt_wy{water_year}.csv')
     # load UASWE data [PROVISIONAL].
     uaswe_provisional_df = pd.read_csv(f'{uaswe_dir}mean_swe_uaswe_acreFt_provisional_wy{water_year}.csv')
+    # load UASWE snowtrax data.
+    try:
+        uaswe_snowtrax_df = load_snowtrax_uaswe(aso_site_name, water_year)
+    except:
+        print('Unable to load Snowtrax UASWE data.')
+        uaswe_snowtrax_df = None
 
     # load SNODAS data.
     snodas_df = pd.read_csv(f'{snodas_dir}mean_swe_snodas_acreFt_wy{water_year}.csv')
@@ -412,6 +437,7 @@ if __name__ =="__main__":
                                   aso_site_name,
                                   current_dates,
                                   current_swe,
+                                  uaswe_snowtrax_df,
                                   plotDir,
                                   aso_stack_type,
                                   train_infer = 'predict NaNs',

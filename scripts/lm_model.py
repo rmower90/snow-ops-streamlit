@@ -692,6 +692,7 @@ def run_cross_val_selection(obs_data,df_sum_total,aso_tseries,all_pillows,start_
     if showOutput:
         print('')
         print(f'Validation station correlation: {np.corrcoef(predictions_validation,summary_data_total[-1])[0,1]**2:.3f}')
+        print(f'Best stations: {[obs_data_6[i].name for i in best_stations]}')
         print('Select best stations')
     stations2 = identify_best_stations(best_stations,aso_tseries_2,elev_band,summary_data_total,isCombination,showOutput = showOutput)
     predictions_bestfit = cross_val_loo(aso_tseries_2[:,elev_band], summary_data_total[stations2,:])
@@ -752,12 +753,20 @@ def run_cross_val_selection2(obs_data,df_sum_total,aso_tseries,all_pillows,start
     if showOutput:
         print('')
         print(f'Validation station correlation: {np.corrcoef(predictions_validation1,summary_data_total[-1])[0,1]**2:.3f}')
+        station_print = list(set(sum(best_stations, [])))
+        station_print = [int(i) for i in station_print]
+
+        print(f'Pil subset #1: {[obs_data_6[i].name for i in range(0,len(obs_data_6)) if i in station_print]}')
         print('Select best stations')
     
     # select best stations.
     stations2 = identify_best_stations(best_stations,aso_tseries_2,elev_band,summary_data_total,isCombination,showOutput = showOutput)
 
     if showOutput:
+        station_print2 = [int(i) for i in stations2]
+        print('')
+        print(f'Best Stations: {[obs_data_6[i].name for i in range(0,len(obs_data_6)) if i in station_print2]}')
+        print('Select best stations')
         print('Running Cross Validation #2')
 
     ## run station selection based on cross-validation
