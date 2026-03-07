@@ -525,6 +525,10 @@ function renderConcatenatedTableHTML(
 
     "  </div>",
     "",
+    '  <div style="text-align: center; margin: 20px auto;">',
+    '    <a href="insitu_qa/html/pillow_qa.html" style="font-size: 16px; font-weight: bold;">Pillow QA Investigation</a>',
+    '  </div>',
+    "",
     '  <button onclick="toggleMetadata()">Show Metadata</button>',
     '  <div id="metadata-box">',
 

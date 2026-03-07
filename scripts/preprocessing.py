@@ -13,6 +13,7 @@ def train_test_split(aso_spatial_data: xr.Dataset,
                      aso_tseries_data: xr.Dataset,
                      insitu_data: list,
                      test_water_year: int,
+                     isFriant = False,
                     ):
     # test dataset aso
     try:
@@ -34,8 +35,13 @@ def train_test_split(aso_spatial_data: xr.Dataset,
     insitu_test = []
     insitu_qa = []
     for pil in insitu_data:
-        da_train = pil.where(pil.time < np.datetime64(f'{test_water_year-1}-10-01'),drop = True)
-        da_qa = pil.where(pil.time >= np.datetime64(f'2013-01-01'),drop = True).where(pil.time < np.datetime64(f'{test_water_year-1}-10-01'),drop = True)
+        da_test = pil.where(pil.time >= np.datetime64(f'{test_water_year-1}-10-01'),drop = True).where(pil.time < np.datetime64(f'{test_water_year}-10-01'),drop = True)
+        da_train = pil.where(~pil.time.isin(da_test.time.values),drop = True)
+        # da_train = pil.where(pil.time < np.datetime64(f'{test_water_year-1}-10-01'),drop = True)
+        if isFriant:
+            da_qa = da_train.where(da_train.time >= np.datetime64(f'2013-01-01'),drop = True).where(da_train.time < np.datetime64(f'2025-10-01'),drop = True)
+        else:
+            da_qa = pil.where(pil.time >= np.datetime64(f'2013-01-01'),drop = True).where(pil.time < np.datetime64(f'{test_water_year-1}-10-01'),drop = True)
 
         insitu_train.append(da_train)
         insitu_qa.append(da_qa)

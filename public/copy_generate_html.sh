@@ -13,6 +13,8 @@ streamlit_output_dir="/home/rossamower/work/aso/snow-ops-streamlit/data/basins/"
 current_dir=$(pwd)
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
+
+
 for basin in "${BASINS[@]}"; do
     # uaswe file paths.
     uaswe_dir_in="${model_output_dir}uaswe/${basin}/"

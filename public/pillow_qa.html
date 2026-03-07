@@ -1,0 +1,161 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Pillow QA Investigation</title>
+  <style>
+    body { font-family: Arial, sans-serif; }
+    .layout { display: flex; flex-direction: column; align-items: center; gap: 18px; max-width: 1100px; margin: 0 auto; }
+    .plot-section { width: 100%; text-align: center; }
+    .plot-section img { width: 100%; height: auto; border: 1px solid #ddd; }
+    .plot-section h2 { margin: 0 0 10px 0; }
+    .missing { color: #a00; font-style: italic; }
+    select { font-size: 16px; padding: 6px 12px; margin: 10px 0; }
+    label { font-size: 16px; font-weight: bold; }
+    #plots { display: none; }
+    button { display: block; margin: 20px auto; padding: 10px 20px; font-size: 14px; cursor: pointer; }
+    #metadata-box { display: none; margin: 20px auto; max-width: 1100px; padding: 20px; border: 1px solid #ddd; background-color: #f9f9f9; }
+    #metadata-box h2 { margin-top: 0; }
+    #metadata-box dl { margin: 10px 0; }
+    #metadata-box dt { font-weight: bold; margin-top: 10px; }
+    #metadata-box dd { margin-left: 20px; margin-bottom: 5px; }
+  </style>
+</head>
+<body>
+  <div style="text-align: center; margin: 10px auto;">
+    <a href="../../USCASJ.html" style="font-size: 14px;">&larr; Back to USCASJ Predictions</a>
+  </div>
+
+  <h1 style="text-align: center;">Pillow QA Investigation</h1>
+
+  <div class="layout">
+    <div>
+      <label for="pillow-select">Snow Pillow Selection:</label>
+      <select id="pillow-select" onchange="updateImages(this.value)">
+        <option value="">-- Select a pillow --</option>
+        <option value="AGP">AGP</option>
+        <option value="BCB">BCB</option>
+        <option value="BGP">BGP</option>
+        <option value="BSH">BSH</option>
+        <option value="CHM">CHM</option>
+        <option value="DAN">DAN</option>
+        <option value="DPO">DPO</option>
+        <option value="FLV">FLV</option>
+        <option value="GEM">GEM</option>
+        <option value="GRM">GRM</option>
+        <option value="GRV">GRV</option>
+        <option value="HNT">HNT</option>
+        <option value="KSP">KSP</option>
+        <option value="KUB">KUB</option>
+        <option value="KUP">KUP</option>
+        <option value="LLE">LLE</option>
+        <option value="MAM">MAM</option>
+        <option value="MHP">MHP</option>
+        <option value="PSR">PSR</option>
+        <option value="SLK">SLK</option>
+        <option value="SNF">SNF</option>
+        <option value="STL">STL</option>
+        <option value="STR">STR</option>
+        <option value="SWM">SWM</option>
+        <option value="TMR">TMR</option>
+        <option value="TNY">TNY</option>
+        <option value="TUM">TUM</option>
+        <option value="UBC">UBC</option>
+        <option value="VLC">VLC</option>
+        <option value="WWC">WWC</option>
+      </select>
+    </div>
+
+    <div id="plots">
+      <div class="plot-section">
+        <h2>Combined QA Methods</h2>
+        <img id="plot-combined" src="" alt="Combined QA Methods" />
+      </div>
+
+      <div class="plot-section">
+        <h2>Static QA</h2>
+        <img id="plot-static" src="" alt="Static QA" />
+      </div>
+
+      <div class="plot-section">
+        <h2>Voting QA</h2>
+        <img id="plot-voting" src="" alt="Voting QA" />
+      </div>
+
+      <div class="plot-section">
+        <h2>SnowModel QA</h2>
+        <img id="plot-snowmodel" src="" alt="SnowModel QA" />
+      </div>
+    </div>
+  </div>
+
+  <button onclick="toggleMetadata()">Show Metadata</button>
+  <div id="metadata-box">
+    <h2>Definitions</h2>
+    <dl>
+      <dt><strong>Combined QA Methods</strong></dt>
+      <dd>2/3 majority QA flags are required to exclude a snow pillow from being used in the MLR Prediction model (i.e., set to NaN).</dd>
+
+      <dt><strong>Static QA</strong></dt>
+      <dd>Uses absolute SWE and peer-median comparisons (no regression) to flag suspect data:
+        <ul>
+          <li><strong>Hard checks:</strong> Flags missing data (NaN), physically impossible values (SWE &lt; 0 or &gt; 3000 mm), and NaN-to-value transitions (previous day NaN, current day finite).</li>
+          <li><strong>dSWE envelope:</strong> Flags daily SWE change that falls outside the 0.5th–99.5th percentile range of historic daily changes, scaled by an engineering buffer (1.5×).</li>
+          <li><strong>Peer-median residual:</strong> Computes the median SWE of the top-5 most correlated pillows (by R²). Flags the target if its absolute residual from that peer median exceeds a MAD-based threshold (3σ × 1.2× SE buffer, with minimums of 25 mm absolute and 5% relative).</li>
+          <li><strong>Melt gating:</strong> Skips the peer-median check when both the current pillow and peer median are below a snow-present threshold (50 mm) to avoid false positives during melt-out.</li>
+        </ul>
+      </dd>
+
+      <dt><strong>Voting QA</strong></dt>
+      <dd>Each correlated pillow "votes" on whether the target's daily behavior is consistent, using pairwise OLS regressions on daily dSWE:
+        <ul>
+          <li><strong>Hard checks:</strong> Same as Static QA — missing data, physical range, NaN-to-value transition.</li>
+          <li><strong>dSWE envelope:</strong> Same quantile-based envelope check as Static QA.</li>
+          <li><strong>Peer-regression voting:</strong> For each of the top-5 dynamically ranked correlated pillows, fits a simple linear regression (dSWE_target ~ dSWE_voter) on historic data. Each voter casts a weighted "OK" or "suspect" vote based on whether the target's residual exceeds a MAD-based threshold. The pillow is flagged when the R²-weighted fraction of OK votes falls below 60%.</li>
+          <li><strong>Trimming:</strong> The most extreme voter (by absolute residual) is trimmed before tallying, as long as the minimum voter count (3) is maintained.</li>
+          <li><strong>Melt gating:</strong> Suppresses dSWE envelope and voting flags when both current and previous SWE are below the snow-present threshold (50 mm).</li>
+        </ul>
+      </dd>
+
+      <dt><strong>SnowModel QA</strong></dt>
+      <dd>Uses HRRR-driven SnowModel gridded SWE as an independent reference to flag suspect data:
+        <ul>
+          <li><strong>Hard checks:</strong> Same as Static and Voting — missing data, physical range, NaN-to-value transition.</li>
+          <li><strong>dSWE envelope:</strong> Same quantile-based envelope check as Static QA.</li>
+          <li><strong>SnowModel prediction interval:</strong> Uses OLS regression of observed SWE against HRRR SnowModel SWE at the 3 best-correlated grid cells (best, second, third) with seasonal sin/cos terms. Flags the pillow when |observed − predicted| exceeds a threshold based on the prediction standard error (z=2.0 × SE_buff=1.2 × SE_pred), with minimums of 25 mm absolute and 5% relative.</li>
+          <li><strong>Melt gating:</strong> Suppresses dSWE envelope and prediction-residual flags when both observed and predicted SWE are below the snow-present threshold (50 mm).</li>
+        </ul>
+      </dd>
+    </dl>
+  </div>
+
+  <script>
+    function updateImages(pil) {
+      var plotsDiv = document.getElementById("plots");
+      if (!pil) {
+        plotsDiv.style.display = "none";
+        return;
+      }
+      var base = "../png/";
+      document.getElementById("plot-combined").src = base + pil + ".png";
+      document.getElementById("plot-static").src = base + pil + "_static_diagnostics.png";
+      document.getElementById("plot-voting").src = base + pil + "_voting_diagnostics.png";
+      document.getElementById("plot-snowmodel").src = base + pil + "_snowmodel_diagnostics.png";
+      plotsDiv.style.display = "block";
+    }
+
+    function toggleMetadata() {
+      var metaBox = document.getElementById("metadata-box");
+      var button = document.querySelector("button");
+      if (metaBox.style.display === "none" || metaBox.style.display === "") {
+        metaBox.style.display = "block";
+        button.textContent = "Hide Metadata";
+      } else {
+        metaBox.style.display = "none";
+        button.textContent = "Show Metadata";
+      }
+    }
+  </script>
+</body>
+</html>
