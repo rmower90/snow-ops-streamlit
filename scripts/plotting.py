@@ -533,7 +533,7 @@ def html_timeseries_plot(
             handles=mlr_handles,
             labels=mlr_labels,
             title='MLR Predictions',
-            loc='upper right',
+            loc='upper left',
             fontsize=8,
             title_fontproperties={'weight': 'bold', 'size': 9}
         )
@@ -543,7 +543,7 @@ def html_timeseries_plot(
         ax.legend(
             handles=model_handles,
             title='Model Predictions',
-            loc='lower right',
+            loc='lower left',
             fontsize=8,
             title_fontproperties={'weight': 'bold', 'size': 9}
         )
