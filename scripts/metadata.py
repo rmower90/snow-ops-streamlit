@@ -67,6 +67,27 @@ def cut_elevation(elev_da: xr.DataArray, edges_m: np.ndarray, labels: list[str])
     )
     return labeled
 
+def excluded_pillows_on(date, exclude_always=None, exclude_ranges=None) -> set[str]:
+    """Return the set of pillow names excluded on the given date.
+
+    Args:
+        date: any date-like value accepted by pd.Timestamp.
+        exclude_always: iterable of pillow names that are always excluded
+            (cfg['pillow_api']['exclude_pillows']).
+        exclude_ranges: iterable of dicts with keys 'pillow', 'start', 'end'
+            (cfg['pillow_api']['exclude_pillows_ranges']). A range matches when
+            start <= date <= end (inclusive). Missing start or end means open-ended.
+    """
+    d = pd.Timestamp(date).normalize()
+    out = set(exclude_always or [])
+    for r in (exclude_ranges or []):
+        s = pd.Timestamp(r['start']).normalize() if r.get('start') is not None else None
+        e = pd.Timestamp(r['end']).normalize() if r.get('end') is not None else None
+        if (s is None or d >= s) and (e is None or d <= e):
+            out.add(r['pillow'])
+    return out
+
+
 def bin_counts(elev_da_m: xr.DataArray, edges_m: np.ndarray, labels: list[str], dims: list[str] | None = None) -> pd.Series:
     """
     Count pixels (or points) per bin. If dims is None, count all elements.

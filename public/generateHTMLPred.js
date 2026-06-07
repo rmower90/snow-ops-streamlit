@@ -20,6 +20,10 @@ const path = require("path");
 // --------------------------
 const ROOT = "/home/rossamower/work/aso/data/mlr_prediction";
 const SEASONALITIES = ["season", "accum", "melt"];
+// only these top-level model dirs are surfaced in the table / plots.
+// any other dir found by the recursive walker (e.g. snapshot trees like
+// COMMON_MASK__pre_exclude) is ignored.
+const KNOWN_MODELS = ["COMMON_MASK", "SNOWMODEL_IMPUTE"];
 const SCRIPT_DIR = __dirname;
 const OUT_DIR = SCRIPT_DIR;
 
@@ -183,6 +187,12 @@ function inferModelAndSeasonality(csvPath) {
       // If layout is .../<BASIN>/models/<MODEL>/<seasonality>/...
       if (i > 1 && parts[i - 2] === "models") {
         modelName = parts[i - 1];
+      }
+
+      // ignore any directory that isn't a recognized model
+      // (snapshot trees like COMMON_MASK__pre_exclude are skipped here).
+      if (KNOWN_MODELS.indexOf(modelName) === -1) {
+        return null;
       }
 
       return { modelName: modelName, seasonality: seasonality };
@@ -526,7 +536,11 @@ function renderConcatenatedTableHTML(
     "  </div>",
     "",
     '  <div style="text-align: center; margin: 20px auto;">',
-    '    <a href="insitu_qa/html/pillow_qa.html" style="font-size: 16px; font-weight: bold;">Pillow QA Investigation</a>',
+    '    <a href="insitu_qa/html/' + basin + '_qa.html" style="font-size: 16px; font-weight: bold;">Pillow QA Investigation</a>',
+    '  </div>',
+    "",
+    '  <div style="text-align: center; margin: 20px auto;">',
+    '    <a href="swe_volume/html/' + basin + '_swe_volume.html" style="font-size: 16px; font-weight: bold;">SWE Volume by Elevation (ASO Dates)</a>',
     '  </div>',
     "",
     '  <button onclick="toggleMetadata()">Show Metadata</button>',

@@ -800,9 +800,15 @@ def plot_pillow_qa_timeline(
     start=None,
     end=None,
     title=None,
+    manual_windows: list = None,
     saveFIG: bool = False,
     figDIR: str = None
 ):
+    """
+    manual_windows: optional list of (start, end) tuples for this pillow's
+    YAML-specified exclusion ranges. Drawn as full-height translucent bars
+    labelled 'Manual removed'. Independent of the automated QA flags.
+    """
 
     # --- pull SWE series ---
     raw = ds_raw[pillow].to_series()
@@ -877,17 +883,20 @@ def plot_pillow_qa_timeline(
     maj_plot = (flags_plot.sum(axis=1) >= majority_k).astype(int)  # optional, if you want widened majority too
 
 
-    # manual removal flag
-    if qa is not None:
-        manual_removed = ((raw.notna()) & (qa.isna())).astype(int)
-    else:
-        manual_removed = pd.Series(0, index=idx)
-
     # --- plotting ---
     fig, ax = plt.subplots(figsize=(13, 5))
     ax.plot(raw.index, raw.values, label="Raw SWE", linewidth=1.8)
     if qa is not None:
-        ax.plot(qa.index, qa.values, label="Manual QA SWE", linewidth=2.2, linestyle="--")
+        ax.plot(qa.index, qa.values, label="QA SWE", linewidth=2.2, linestyle="--")
+
+    # manual exclusion windows from YAML config (full-height vertical band per window).
+    if manual_windows:
+        for i, (ws, we) in enumerate(manual_windows):
+            ax.axvspan(
+                pd.Timestamp(ws), pd.Timestamp(we),
+                color="gray", alpha=0.22, zorder=0,
+                label="Manual removed" if i == 0 else "_nolegend_",
+            )
 
     # y-scale helpers for the bands
     y0, y1 = ax.get_ylim()
@@ -895,18 +904,7 @@ def plot_pillow_qa_timeline(
     band_h = 0.06 * yr
     gap = 0.01 * yr
     base = y0 + 0.02 * yr
-
-    # manual removed band
-    ax.fill_between(
-        idx,
-        base,
-        base + band_h * 0.6,
-        where=manual_removed.astype(bool).values,
-        alpha=0.25,
-        label="Manual removed",
-        step="post",
-    )
-    cur_base = base + band_h * 0.6 + gap
+    cur_base = base
 
     # method bands
     for m in methods:
@@ -952,9 +950,390 @@ def plot_pillow_qa_timeline(
         plt.show()
 
     if qa is not None:
-        return {"raw": raw, "qa": qa, "flags": flags_plot, "majority": maj_true, "manual_removed": manual_removed}
+        return {"raw": raw, "qa": qa, "flags": flags_plot, "majority": maj_true}
     else:
-        return {"raw": raw, "flags": flags_plot, "majority": maj_true, "manual_removed": manual_removed}
+        return {"raw": raw, "flags": flags_plot, "majority": maj_true}
+
+
+def plot_all_pillows_qa_timeline(
+    ds_raw: "xr.Dataset",
+    df_simple: pd.DataFrame,
+    methods=("static", "voting", "snowmodel"),
+    majority_k: int = 2,
+    start=None,
+    end=None,
+    manual_windows_per_pillow: dict = None,
+    pillows: list = None,
+    ncols: int = 5,
+    saveFIG: bool = False,
+    figDIR: str = None,
+    figFNAME: str = "all_pils.png",
+    dpi: int = 300,
+):
+    """
+    All-pillows grid version of plot_pillow_qa_timeline.
+
+    One PNG with a subplot per pillow (sharex=True, sharey=True). Each subplot shows
+    the raw SWE line, the three method flag bands, the majority band, and the
+    YAML-specified manual-removal windows.
+
+    A single shared legend is placed to the right of the grid.
+    """
+    from matplotlib.patches import Patch
+    from matplotlib.lines import Line2D
+
+    if pillows is None:
+        pillows = list(ds_raw.data_vars)
+    if manual_windows_per_pillow is None:
+        manual_windows_per_pillow = {}
+
+    # ---- prep df_simple once ----
+    d = df_simple.copy()
+    d["time"] = pd.to_datetime(d["time"]).dt.normalize()
+    d["pillow"] = d["pillow"].astype(str).str.strip()
+    d["method"] = d["method"].astype(str).str.strip()
+    d["flag"] = d["flag"].fillna(0).astype(int)
+
+    # ---- common time axis ----
+    raw_times = pd.to_datetime(ds_raw.time.values)
+    tmin = raw_times.min().normalize()
+    tmax = raw_times.max().normalize()
+    if start is not None:
+        tmin = max(tmin, pd.to_datetime(start).normalize())
+    if end is not None:
+        tmax = min(tmax, pd.to_datetime(end).normalize())
+    idx = pd.date_range(tmin, tmax, freq="D")
+
+    # ---- precompute global y-range so the flag/majority bands sit consistently ----
+    raw_series_by_pil = {}
+    g_min, g_max = np.inf, -np.inf
+    for pil in pillows:
+        s = ds_raw[pil].to_series()
+        s.index = pd.to_datetime(s.index).normalize()
+        s = s.reindex(idx)
+        raw_series_by_pil[pil] = s
+        if s.notna().any():
+            g_min = min(g_min, float(s.min()))
+            g_max = max(g_max, float(s.max()))
+    if not np.isfinite(g_min):
+        g_min, g_max = 0.0, 1.0
+    yr = max(g_max - g_min, 1.0)
+    band_h = 0.04 * yr
+    gap = 0.005 * yr
+    base = g_min + 0.02 * yr  # stack of bands starts just above the y-min
+
+    # ---- figure layout ----
+    npils = len(pillows)
+    nrows = int(np.ceil(npils / ncols))
+    fig, axes = plt.subplots(
+        nrows=nrows, ncols=ncols,
+        figsize=(3.6 * ncols, 2.4 * nrows),
+        sharex=True, sharey=True,
+        squeeze=False,
+    )
+
+    method_colors = {"static": "C1", "voting": "C2", "snowmodel": "C3"}
+
+    for i, pil in enumerate(pillows):
+        ax = axes.flat[i]
+        raw = raw_series_by_pil[pil]
+
+        # raw line
+        ax.plot(raw.index, raw.values, color="C0", linewidth=1.3, label="_nolegend_")
+
+        # manual removal windows (full-height vertical bands)
+        for ws, we in manual_windows_per_pillow.get(pil, []) or []:
+            ax.axvspan(
+                pd.Timestamp(ws), pd.Timestamp(we),
+                color="gray", alpha=0.22, zorder=0, label="_nolegend_",
+            )
+
+        # per-pillow flags
+        d_pil = d[(d["pillow"] == pil) & (d["method"].isin(methods))]
+        d_pil = d_pil[(d_pil["time"] >= tmin) & (d_pil["time"] <= tmax)]
+        flags = d_pil.pivot_table(index="time", columns="method", values="flag", aggfunc="max")
+        flags = flags.reindex(columns=list(methods)).fillna(0).astype(int)
+        flags = flags.reindex(idx).fillna(0).astype(int)
+
+        # widen single-day flags so they read at this small subplot scale
+        flags_plot = flags.copy()
+        for c in flags_plot.columns:
+            s = flags_plot[c]
+            single = (s == 1) & (s.shift(1, fill_value=0) == 0) & (s.shift(-1, fill_value=0) == 0)
+            flags_plot.loc[single.shift(1, fill_value=False), c] = 1
+            flags_plot.loc[single.shift(-1, fill_value=False), c] = 1
+
+        maj_plot = (flags_plot.sum(axis=1) >= majority_k).astype(int)
+
+        # stack: method bands, then majority on top
+        cur_base = base
+        for m in methods:
+            ax.fill_between(
+                idx, cur_base, cur_base + band_h,
+                where=flags_plot[m].astype(bool).values,
+                alpha=0.30, color=method_colors[m],
+                step="post", label="_nolegend_",
+            )
+            cur_base += band_h + gap
+
+        ax.fill_between(
+            idx, cur_base, cur_base + band_h * 1.2,
+            where=maj_plot.astype(bool).values,
+            alpha=0.40, color="C4",
+            step="post", label="_nolegend_",
+        )
+
+        ax.set_title(pil, fontweight="bold", fontsize=10)
+        ax.grid(True, alpha=0.2)
+        ax.tick_params(axis="x", labelrotation=30, labelsize=8)
+        ax.tick_params(axis="y", labelsize=8)
+
+    # hide unused axes
+    for j in range(npils, nrows * ncols):
+        axes.flat[j].set_visible(False)
+
+    fig.supxlabel("Date", fontweight="bold")
+    fig.supylabel("SWE (mm)", fontweight="bold", x=0.005)
+
+    # shared legend to the right of all subplots
+    legend_elements = [
+        Line2D([0], [0], color="C0", lw=1.5, label="Raw SWE"),
+        Patch(facecolor=method_colors["static"], alpha=0.30, label="static flag"),
+        Patch(facecolor=method_colors["voting"], alpha=0.30, label="voting flag"),
+        Patch(facecolor=method_colors["snowmodel"], alpha=0.30, label="snowmodel flag"),
+        Patch(facecolor="C4", alpha=0.40, label=f"Majority (≥{majority_k}/{len(methods)})"),
+        Patch(facecolor="gray", alpha=0.22, label="Manual removed"),
+    ]
+    fig.legend(
+        handles=legend_elements,
+        loc="center left",
+        bbox_to_anchor=(0.92, 0.5),
+        frameon=True,
+        title="QA Flags",
+        title_fontproperties={"weight": "bold"},
+    )
+
+    plt.tight_layout(rect=[0.03, 0.02, 0.91, 1])
+
+    if saveFIG:
+        if figDIR is None:
+            figDIR = "./qa_viz_2026/"
+        if not os.path.exists(figDIR):
+            os.makedirs(figDIR)
+        plt.savefig(os.path.join(figDIR, figFNAME), dpi=dpi, bbox_inches="tight")
+        plt.close()
+    else:
+        plt.show()
+
+
+def plot_swe_volume_by_elevation(
+    aso_site_name: str,
+    comp_date,
+    aso_mean_swe_df: pd.DataFrame,
+    uaswe_df: pd.DataFrame,
+    snodas_df: pd.DataFrame,
+    sm_df: "pd.DataFrame|None",
+    prediction_acreFt_df: pd.DataFrame,
+    aso_stack_type: str,
+    seasonal_dir: str,
+    area_ref_dict: dict,
+    figDIR: str = None,
+    saveFIG: bool = True,
+    dpi: int = 150,
+):
+    """
+    Single 3-panel SWE-volume-by-elevation comparison for one (model, seasonality, ASO date).
+
+    Panels:
+      - line plot: SWE Volume vs. elevation bin (ASO black; MLR / UASWE / SNODAS [/ SnowModel] dashed)
+      - bar chart: basin total SWE volume per source
+      - table: Basin SWE Error [%] and RMSE across elevation bins [TAF] for each model vs. ASO
+
+    Saves to {figDIR}/{basin}_{model}_{seasonality}_{YYYY-MM-DD}.png.
+    Returns None if there's no ASO data for the given date.
+    """
+    from matplotlib.gridspec import GridSpec
+    from matplotlib.patches import Patch
+
+    elev_bins = ['<7k', '7k-8k', '8k-9k', '9k-10k', '10k-11k', '11k-12k', '>12k']
+
+    def _to_canonical(df):
+        rename = {c: area_ref_dict[c] for c in df.columns if c in area_ref_dict}
+        if 'Basin' in df.columns:
+            rename['Basin'] = 'Total'
+        return df.rename(columns=rename)
+
+    # normalize date for comparisons across heterogeneous source DFs
+    comp_ts = pd.Timestamp(comp_date).normalize()
+
+    # ASO is long-form; rebuild aso_mean_swe_df with datetime index for matching.
+    aso_local = aso_mean_swe_df.copy()
+    aso_local['Date'] = pd.to_datetime(aso_local['Date']).dt.normalize()
+    aso_row = aso_local[aso_local['Date'] == comp_ts]
+    if aso_row.empty:
+        print(f'  [plot_swe_volume_by_elevation] no ASO row for {comp_ts.date()}; skipping')
+        return None
+
+    aso_wide = aso_row[['elev', 'mean_swe']].set_index('elev').T
+    aso_wide = _to_canonical(aso_wide) / 1000.0  # acre-Ft -> TAF
+    try:
+        aso_bin_vals = aso_wide[elev_bins].values.flatten()
+        aso_total = float(aso_wide['Total'].values[0])
+    except KeyError as e:
+        print(f'  [plot_swe_volume_by_elevation] ASO missing expected columns ({e}); skipping')
+        return None
+
+    # slice a wide-format source DF to a one-row DataFrame for comp_ts, canonicalize columns.
+    # `scale` divides numeric columns (e.g., 1000.0 for acre-Ft -> TAF).
+    # `infer_nans_filter` collapses the MLR case where there are multiple rows per date.
+    def _slice_wide(df, scale=1.0, infer_nans_filter=None):
+        if df is None or len(df) == 0:
+            return None
+        d = df.copy()
+        d['Date'] = pd.to_datetime(d['Date']).dt.normalize()
+        sub = d[d['Date'] == comp_ts]
+        if sub.empty:
+            return None
+        if infer_nans_filter is not None and 'Training Infer NaNs' in sub.columns:
+            sub = sub[sub['Training Infer NaNs'] == infer_nans_filter]
+            if sub.empty:
+                return None
+        sub = sub.set_index('Date')
+        sub = sub.select_dtypes(include=[np.number]) / scale
+        return _to_canonical(sub)
+
+    # UASWE / SNODAS / SnowModel CSVs are in acre-Ft (despite their filename suffix); /1000 -> TAF.
+    uaswe_d = _slice_wide(uaswe_df,  scale=1000.0)
+    snodas_d = _slice_wide(snodas_df, scale=1000.0)
+    sm_d = _slice_wide(sm_df, scale=1000.0) if sm_df is not None else None
+    # MLR prediction CSVs are stored in TAF directly (filename suffix is misleading); no scaling.
+    mlr_d = _slice_wide(prediction_acreFt_df, scale=1.0, infer_nans_filter='predict NaNs')
+
+    def _bins(df):
+        return df[elev_bins].values.flatten()
+    def _total(df):
+        return float(df['Total'].values[0])
+
+    # assemble model list (skip any that have no data for this date).
+    # NOTE: SnowModel currently excluded — its basin total runs much higher than ASO and the
+    # bias correction isn't reliable enough to show alongside the other models. Re-add by
+    # uncommenting the SnowModel line below.
+    candidates = [
+        ('MLR',       'tab:blue',   mlr_d),
+        ('SNODAS',    'tab:purple', snodas_d),
+        ('UASWE',     'tab:brown',  uaswe_d),
+        # ('SnowModel', 'tab:green',  sm_d),
+    ]
+    models = []
+    for name, color, df_d in candidates:
+        if df_d is None or len(df_d) == 0:
+            continue
+        try:
+            bv = _bins(df_d)
+            tot = _total(df_d)
+        except KeyError:
+            continue
+        models.append((name, color, bv, tot))
+
+    if not models:
+        print(f'  [plot_swe_volume_by_elevation] no model data for {comp_ts.date()}; skipping')
+        return None
+
+    # KPIs (basin error %, elevation-bin RMSE)
+    kpi_rows = []
+    for name, color, bin_vals, total in models:
+        acc_pct = abs(total - aso_total) / aso_total * 100.0 if aso_total else float('nan')
+        rmse = float(np.sqrt(np.mean((bin_vals - aso_bin_vals) ** 2)))
+        kpi_rows.append((name, color, acc_pct, rmse))
+
+    # title pieces
+    basin_label = {
+        'USCASJ': 'San Joaquin',
+        'USCATM': 'Tuolumne',
+        'USCOBR': 'Blue River',
+        'USCOGE': 'Gunnison',
+    }.get(aso_site_name, aso_site_name)
+    day = comp_ts.day
+    suffix = 'th' if 10 <= day % 100 <= 20 else {1: 'st', 2: 'nd', 3: 'rd'}.get(day % 10, 'th')
+    title_date = comp_ts.strftime(f'%B {day}{suffix}, %Y')
+
+    fig = plt.figure(figsize=(14, 8), dpi=dpi)
+    gs = GridSpec(2, 3, figure=fig, height_ratios=[1.0, 0.4], hspace=0.18, wspace=0.32)
+    ax_line = fig.add_subplot(gs[0, :2])
+    ax_bar = fig.add_subplot(gs[0, 2])
+    ax_tbl = fig.add_subplot(gs[1, :])
+    fig.suptitle(f'{basin_label} Model Comparison\n{title_date}', fontsize=18, fontweight='bold', y=0.98)
+
+    # SWE vs. Elevation
+    aso_line, = ax_line.plot(elev_bins, aso_bin_vals, color='black', lw=2.5, marker='o', label='ASO')
+    model_lines = []
+    for name, color, bin_vals, _ in models:
+        ln, = ax_line.plot(elev_bins, bin_vals, color=color, linestyle='--', label=name)
+        model_lines.append(ln)
+    ax_line.set_title('SWE vs. Elevation', fontweight='bold')
+    ax_line.set_xlabel('Elevation Bins [ft]', fontweight='bold')
+    ax_line.set_ylabel('SWE Volume [TAF]', fontweight='bold')
+    leg1 = ax_line.legend(handles=[aso_line], title='Reference', loc='upper left',
+                          title_fontproperties={'weight': 'bold'})
+    ax_line.add_artist(leg1)
+    ax_line.legend(handles=model_lines, title='Model Output', loc='upper right',
+                   title_fontproperties={'weight': 'bold'})
+
+    # Basin SWE Volume bars
+    bar_labels = [m[0] for m in models] + ['ASO']
+    bar_colors = [m[1] for m in models] + ['black']
+    bar_values = [m[3] for m in models] + [aso_total]
+    ax_bar.bar(range(len(bar_labels)), bar_values, color=bar_colors)
+    ax_bar.set_xticks([])
+    # add ~35% headroom on the y-axis so the top-left & bottom-right legends don't
+    # overlap the tallest bar.
+    y_top = max(bar_values + [1.0])
+    ax_bar.set_ylim(0, y_top * 1.35)
+    ax_bar.set_title('Basin SWE Volume', fontweight='bold')
+    ax_bar.set_ylabel('SWE Volume [TAF]', fontweight='bold')
+    model_handles = [Patch(facecolor=m[1], label=m[0]) for m in models]
+    leg_models = ax_bar.legend(handles=model_handles, title='Model Output', loc='upper left',
+                               title_fontproperties={'weight': 'bold'})
+    ax_bar.add_artist(leg_models)
+    ax_bar.legend(handles=[Patch(facecolor='black', label='ASO')],
+                  title='Reference', loc='lower right',
+                  title_fontproperties={'weight': 'bold'})
+
+    # KPI table
+    ax_tbl.set_axis_off()
+    table_data = [[name, f'{acc:.1f}', f'{rmse:.0f}'] for name, _, acc, rmse in kpi_rows]
+    tbl = ax_tbl.table(
+        cellText=table_data,
+        colLabels=['Model', 'Basin SWE Error [%]', 'RMSE Across Elevation Bins [TAF]'],
+        colWidths=[0.20, 0.35, 0.45],
+        cellLoc='center',
+        loc='upper center',
+    )
+    tbl.auto_set_font_size(False)
+    tbl.set_fontsize(11)
+    tbl.scale(1, 1.6)
+    for col_idx in range(3):
+        header = tbl[(0, col_idx)]
+        header.set_facecolor('#888888')
+        header.set_text_props(color='white', weight='bold', fontsize=10)
+    for row_idx, (_, color, _, _) in enumerate(kpi_rows, start=1):
+        cell = tbl[(row_idx, 0)]
+        cell.set_facecolor(color)
+        cell.set_text_props(color='white', weight='bold')
+
+    if saveFIG:
+        if figDIR is None:
+            figDIR = './swe_volume/'
+        if not os.path.exists(figDIR):
+            os.makedirs(figDIR)
+        date_str = comp_ts.strftime('%Y-%m-%d')
+        fname = f'{aso_site_name}_{aso_stack_type}_{seasonal_dir}_{date_str}.png'
+        plt.savefig(os.path.join(figDIR, fname), dpi=dpi, bbox_inches='tight')
+        plt.close()
+        return os.path.join(figDIR, fname)
+    else:
+        plt.show()
+        return None
 
 
 def plot_qa_method_diagnostics(
@@ -973,6 +1352,7 @@ def plot_qa_method_diagnostics(
     majority_df_simple=None,    # optional: df_simple (to compute majority flags and show on strip)
     majority_k: int = 2,
     methods_for_majority=("static", "voting", "snowmodel"),
+    manual_windows: list = None,
     saveFIG: bool = False,
     figDIR: str = None
 ):
@@ -1024,10 +1404,6 @@ def plot_qa_method_diagnostics(
     if qa is not None:
         qa = qa.reindex(idx)
 
-    manual_removed = pd.Series(0, index=idx)
-    if show_manual_removed and qa is not None:
-        manual_removed = ((raw.notna()) & (qa.isna())).astype(int)
-
     # --- detail rows for this method/pillow ---
     d = df_detail.copy()
     d["time"] = pd.to_datetime(d["time"]).dt.normalize()
@@ -1046,6 +1422,20 @@ def plot_qa_method_diagnostics(
     final_flag = d["flag"].fillna(0).astype(int) if "flag" in d.columns else pd.Series(0, index=idx)
     reason_code = d["reason_code"].astype(str) if "reason_code" in d.columns else pd.Series("", index=idx)
     reason_detail = d["reason_detail"].astype(str) if "reason_detail" in d.columns else pd.Series("", index=idx)
+
+    # method-specific signal isolated from shared data-integrity checks
+    # (MISSING_TODAY, PHYS_*, NAN_*, DSWE_* are computed identically by all 3 methods —
+    # plotting `final_flag` here would conflate them with the actual method-specific signal).
+    METHOD_SPECIFIC_REASONS = {
+        "static":    "PEER_RESID_TOO_LARGE",
+        "voting":    "VOTING_INCONSISTENT",
+        "snowmodel": "PRED_RESID_TOO_LARGE",
+    }
+    specific_reason = METHOD_SPECIFIC_REASONS.get(qa_method)
+    method_flag = (
+        (reason_code == specific_reason).astype(int)
+        if specific_reason is not None else final_flag
+    )
 
     # --- optional: majority flags computed from df_simple ---
     maj = None
@@ -1130,10 +1520,20 @@ def plot_qa_method_diagnostics(
 
     ax0, ax1, axf = axes
 
+    # manual exclusion windows from YAML config: full-height bars on each panel for visual continuity.
+    if manual_windows:
+        for ax_i in (ax0, ax1, axf):
+            for j, (ws, we) in enumerate(manual_windows):
+                ax_i.axvspan(
+                    pd.Timestamp(ws), pd.Timestamp(we),
+                    color="gray", alpha=0.22, zorder=0,
+                    label="Manual removed" if (ax_i is ax0 and j == 0) else "_nolegend_",
+                )
+
     # --- panel 0: target series ---
     ax0.plot(idx, raw.values, label="Raw SWE", linewidth=1.8)
     if qa is not None:
-        ax0.plot(idx, qa.values, label="Manual QA SWE", linewidth=2.2, linestyle="--")
+        ax0.plot(idx, qa.values, label="QA SWE", linewidth=2.2, linestyle="--")
 
     # static: peer band
     if qa_method == "static" and peer_med is not None and thr is not None:
@@ -1145,8 +1545,9 @@ def plot_qa_method_diagnostics(
         ax0.plot(idx, yhat.values, label="snowmodel yhat", linewidth=1.5)
         ax0.fill_between(idx, (yhat - thr).values, (yhat + thr).values, alpha=0.2, label="yhat ± thr")
 
-    # mark final flags
-    ax0.scatter(idx[final_flag.astype(bool)], raw[final_flag.astype(bool)],
+    # mark method-specific flags only (shared data-integrity reasons are filtered out;
+    # they're identical across all three methods and would mis-attribute the cause).
+    ax0.scatter(idx[method_flag.astype(bool)], raw[method_flag.astype(bool)],
                 s=18, zorder=5, label=f"{qa_method} flag")
 
     ax0.set_ylabel("SWE (mm)")
@@ -1197,17 +1598,12 @@ def plot_qa_method_diagnostics(
     axf.set_yticks([])
     axf.grid(False)
 
-    # manual removed
-    axf.fill_between(idx, 0.00, 0.33, where=manual_removed.astype(bool).values,
-                     step="post", alpha=0.25, label="Manual removed")
-
-    # method flag
-    axf.fill_between(idx, 0.33, 0.66, where=final_flag.astype(bool).values,
+    # method-specific flag (lower half) + majority (upper half)
+    axf.fill_between(idx, 0.00, 0.50, where=method_flag.astype(bool).values,
                      step="post", alpha=0.35, label=f"{qa_method} flag")
 
-    # majority (optional)
     if maj is not None:
-        axf.fill_between(idx, 0.66, 1.00, where=maj.astype(bool).values,
+        axf.fill_between(idx, 0.50, 1.00, where=maj.astype(bool).values,
                          step="post", alpha=0.25, label=f"Majority (≥{majority_k}/{len(methods_for_majority)})")
 
     axf.legend(loc="upper left", ncol=3)

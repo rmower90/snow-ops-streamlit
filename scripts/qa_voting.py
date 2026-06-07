@@ -157,7 +157,6 @@ def run_voting_qa(
             except Exception:
                 melt_gate = False
 
-        dswe_flag_raw = False
         voting_flag_raw = False
 
         # ---------- HARD CHECK 0: missing today ----------
@@ -167,20 +166,11 @@ def run_voting_qa(
         # (only applies if cur_val is finite)
         phys_flag = (np.isfinite(cur_val) and ((cur_val < 0.0) or (cur_val > max_swe_mm)))
 
-        # ---------- Hard flag A: NaN -> value transition ----------
-        nan_transition_flag = (np.isnan(prev_val) and (not np.isnan(cur_val)))
-
-        # ---------- Hard flag B: dswe/dt envelope (robust quantiles) ----------
-        dswe_flag = False
-        lo = hi = np.nan
-        if pil in hist_diff.columns:
-            d = hist_diff[pil].to_numpy(dtype=float)
-            d = d[np.isfinite(d)]
-            if d.size >= 30 and np.isfinite(dcur):
-                lo = float(np.quantile(d, q_lo))
-                hi = float(np.quantile(d, q_hi))
-                dswe_flag_raw = (dcur < lo * engineering_buff) or (dcur > hi * engineering_buff)
-                dswe_flag = bool(dswe_flag_raw and (not melt_gate))
+        # NOTE: nan_transition_flag and dswe_flag were previously computed here too.
+        # those generic data-integrity checks are now owned by qa_static only — keeping
+        # them duplicated in voting/snowmodel made the 2-of-3 majority vote deterministic
+        # on shared reasons (~91% of majority firings). voting now only acts on its unique
+        # peer-vote signal, requiring corroboration from a method-specific check to mask.
 
         # ---------- Voting: peer consistency on ΔSWE (default) ----------
         # ---------- Voting: choose top-K correlated available voters ----------
@@ -291,12 +281,12 @@ def run_voting_qa(
                 voting_flag = False
 
         # ---------- Combine flags into final binary QA ----------
-        # Any hard check wins. Voting is only advisory on top of those.
+        # voting now contributes only its method-specific signal plus the unambiguous
+        # data checks (missing today / physical range). nan_transition and dswe are
+        # owned by qa_static so they need majority corroboration to mask.
         suspect = bool(
             missing_today_flag
             or phys_flag
-            or dswe_flag
-            or nan_transition_flag
             or voting_flag
         )
         qa[pil] = 1 if suspect else 0
@@ -311,18 +301,9 @@ def run_voting_qa(
         elif phys_flag:
             reason_code = "PHYS_RANGE"
             reason_detail = f"cur={cur_val:.1f} mm outside [0,{max_swe_mm:.0f}]" if np.isfinite(cur_val) else "physical range"
-        elif nan_transition_flag:
-            reason_code = "NAN_TO_VALUE"
-            reason_detail = "previous was NaN, current became finite"
-        elif melt_gate and (dswe_flag_raw or voting_flag_raw) and (not (missing_today_flag or phys_flag or nan_transition_flag)):
+        elif melt_gate and voting_flag_raw and (not (missing_today_flag or phys_flag)):
             reason_code = "MELT_GATE_SKIP"
-            reason_detail = f"cur/prev < {float(snow_present_mm):.1f} mm; suppressed: " + ("DSWE " if dswe_flag_raw else "") + ("VOTING" if voting_flag_raw else "")
-        elif dswe_flag:
-            reason_code = "DSWE_ENVELOPE"
-            if np.isfinite(lo) and np.isfinite(hi) and np.isfinite(dcur):
-                reason_detail = f"dSWE={dcur:.1f} outside [{lo:.1f},{hi:.1f}]*buff({engineering_buff:.2f})"
-            else:
-                reason_detail = "dSWE outside envelope"
+            reason_detail = f"cur/prev < {float(snow_present_mm):.1f} mm; suppressed: VOTING"
         elif voting_flag:
             reason_code = "VOTING_INCONSISTENT"
             if np.isfinite(vote_ok_frac):
@@ -342,12 +323,8 @@ def run_voting_qa(
             "cur_mm": cur_val,
             "prev_mm": prev_val,
             "diff_mm": dcur,
-            "dq_lo": lo,
-            "dq_hi": hi,
             "missing_today_flag": int(missing_today_flag),
             "phys_flag": int(phys_flag),
-            "nan_transition_flag": int(nan_transition_flag),
-            "dswe_flag": int(dswe_flag),
             "melt_gate": int(melt_gate),
             "pred_flag": 0,
             "pred_check_skipped": 1 if (missing_today_flag or not np.isfinite(dcur)) else 0,
@@ -369,11 +346,6 @@ def run_voting_qa(
             print(f"{pil}: QA={qa[pil]}")
             print(f"  cur={cur_val if np.isfinite(cur_val) else np.nan:.1f} mm prev={prev_val if np.isfinite(prev_val) else np.nan:.1f} mm dSWE={dcur if np.isfinite(dcur) else np.nan:.1f} mm/day")
             print(f"  hard_checks: missing_today_flag={missing_today_flag} phys_flag={phys_flag} (max_swe_mm={max_swe_mm:.0f})")
-            if np.isfinite(lo) and np.isfinite(hi):
-                print(f"  envelope[{q_lo:.3f},{q_hi:.3f}]={lo:.1f},{hi:.1f} (buff={engineering_buff:.2f}) dswe_flag={dswe_flag}")
-            else:
-                print(f"  envelope: n/a dswe_flag={dswe_flag}")
-            print(f"  nan_transition_flag={nan_transition_flag}")
             if np.isfinite(vote_ok_frac):
                 print(f"  voting: ok_frac={vote_ok_frac:.2f} (thresh={ok_frac_thresh:.2f}) voters_used={n_used} dropped={n_dropped} voting_flag={voting_flag}")
             else:

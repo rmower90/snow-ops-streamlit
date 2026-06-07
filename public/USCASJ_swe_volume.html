@@ -1,0 +1,78 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>USCASJ — SWE Volume by Elevation (ASO Dates)</title>
+  <style>
+    body { font-family: Arial, sans-serif; }
+    .layout { display: flex; flex-direction: column; align-items: center; gap: 18px; max-width: 1400px; margin: 0 auto; }
+    .controls { display: flex; gap: 24px; align-items: center; flex-wrap: wrap; justify-content: center; }
+    .controls label { font-size: 16px; font-weight: bold; margin-right: 4px; }
+    select { font-size: 16px; padding: 6px 12px; margin: 10px 0; }
+    .plot-block { width: 100%; text-align: center; margin: 24px 0; }
+    .plot-block h2 { margin: 0 0 8px 0; font-size: 18px; }
+    .plot-block img { width: 100%; height: auto; border: 1px solid #ddd; }
+    .empty-state { padding: 40px 20px; text-align: center; color: #555; font-style: italic; background-color: #f9f9f9; border: 1px solid #ddd; }
+  </style>
+</head>
+<body>
+  <div style="text-align: center; margin: 10px auto;">
+    <a href="../../USCASJ.html" style="font-size: 14px;">&larr; Back to USCASJ Predictions</a>
+  </div>
+
+  <h1 style="text-align: center;">USCASJ &mdash; SWE Volume by Elevation (ASO Dates)</h1>
+
+  <div class="layout">
+    <div class="controls">
+      <div>
+        <label for="model-select">MLR Model:</label>
+        <select id="model-select" onchange="updatePlots()">
+          <option value="COMMON_MASK" selected>Pillow Impute</option>
+          <option value="SNOWMODEL_IMPUTE">SnowModel Impute</option>
+        </select>
+      </div>
+      <div>
+        <label for="season-select">Seasonality:</label>
+        <select id="season-select" onchange="updatePlots()">
+          <option value="season" selected>Season</option>
+          <option value="accum">Accumulation</option>
+          <option value="melt">Melt</option>
+        </select>
+      </div>
+    </div>
+
+    <div id="plots"></div>
+  </div>
+
+  <script>
+    var BASIN = "USCASJ";
+    // ASO dates discovered at generate time from the PNG directory. Empty array if no flights yet.
+    var ASO_DATES = ["2026-01-27","2026-03-03","2026-03-28","2026-04-29","2026-05-18"];
+
+    function updatePlots() {
+      var model = document.getElementById("model-select").value;
+      var season = document.getElementById("season-select").value;
+      var plotsDiv = document.getElementById("plots");
+
+      if (!ASO_DATES.length) {
+        plotsDiv.innerHTML =
+          '<div class="empty-state">No ASO flights have been recorded for this water year yet.</div>';
+        return;
+      }
+
+      var html = ASO_DATES.map(function (date) {
+        var src = "../png/" + BASIN + "/" + BASIN + "_" + model + "_" + season + "_" + date + ".png";
+        return '<div class="plot-block">' +
+                 '<h2>ASO Flight: ' + date + '</h2>' +
+                 '<img src="' + src + '" alt="SWE volume by elevation for ' + date + '" />' +
+               '</div>';
+      }).join("");
+      plotsDiv.innerHTML = html;
+    }
+
+    // initial render — applies the default model + season selections
+    updatePlots();
+  </script>
+</body>
+</html>

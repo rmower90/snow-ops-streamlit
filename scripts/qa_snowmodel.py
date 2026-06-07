@@ -369,6 +369,9 @@ def daily_qa_flag_snowmodel_v2(
     min_rel: float = 0.05,
     # hard checks
     max_swe_mm: float = 3000.0,
+    # melt-gate: when snowmodel predicts <snow_present_mm, suppress the pred residual check
+    # to avoid flagging lingering pillow snow as a disagreement with near-zero predictions.
+    snow_present_mm: float = None,
 ) -> pd.DataFrame:
     """
     Returns 1-row df with time + per-pillow QA flag {0,1}.
@@ -388,18 +391,10 @@ def daily_qa_flag_snowmodel_v2(
         missing_today_flag = np.isnan(cur_val)
         phys_flag = (np.isfinite(cur_val) and ((cur_val < 0.0) or (cur_val > max_swe_mm)))
 
-        nan_transition_flag = (np.isnan(prev_val) and (not np.isnan(cur_val)))
-
-        # dswe envelope
-        dswe_flag = False
-        lo = hi = np.nan
-        if pil in hist_diff.columns and np.isfinite(dcur):
-            d = hist_diff[pil].to_numpy(float)
-            d = d[np.isfinite(d)]
-            if d.size >= 30:
-                lo = float(np.quantile(d, q_lo))
-                hi = float(np.quantile(d, q_hi))
-                dswe_flag = (dcur < lo * engineering_buff) or (dcur > hi * engineering_buff)
+        # NOTE: nan_transition and dswe-envelope checks were removed from snowmodel —
+        # those generic data-integrity checks are now owned by qa_static only so that the
+        # 2-of-3 majority requires real corroboration rather than deterministic agreement
+        # on shared reasons.
 
         # prediction disagreement using PI-style threshold
         yhat = float(df_yhat[pil].values) if pil in df_yhat else np.nan
@@ -412,13 +407,18 @@ def daily_qa_flag_snowmodel_v2(
         if np.isfinite(yhat) and np.isfinite(se_pred):
             thr = max(z * se_buff * se_pred, min_abs_mm, min_rel * max(yhat, 1.0))
 
-        # only evaluate pred_flag if we also have an observation today
+        # only evaluate pred_flag if we also have an observation today.
+        # melt-gate: skip the pred check when snowmodel predicts <snow_present_mm so we
+        # don't flag lingering pillow snow as disagreement with near-zero predictions.
         if (not missing_today_flag) and np.isfinite(thr):
-            pred_flag = (abs(cur_val - yhat) > thr)
+            if (snow_present_mm is not None) and np.isfinite(yhat) and (yhat < float(snow_present_mm)):
+                pred_flag = False
+            else:
+                pred_flag = (abs(cur_val - yhat) > thr)
 
 
         suspect = bool(
-            missing_today_flag or phys_flag or nan_transition_flag or dswe_flag or pred_flag
+            missing_today_flag or phys_flag or pred_flag
         )
         qa[pil] = 1 if suspect else 0
 
@@ -427,12 +427,7 @@ def daily_qa_flag_snowmodel_v2(
             print(f"{pil}: QUALITYSCORE {qa[pil]}")
             print(f"  current {_fmt(cur_val)} mm; yhat {_fmt(yhat)} mm; thr {_fmt(thr)} mm")
             print(f"  previous {_fmt(prev_val)} mm; diff {_fmt(dcur)} mm")
-            if np.isfinite(lo) and np.isfinite(hi):
-                print(f"  hist_dq[{q_lo:.3f},{q_hi:.3f}] = [{_fmt(lo)},{_fmt(hi)}] mm/day")
-            else:
-                print(f"  hist_dq[{q_lo:.3f},{q_hi:.3f}] = n/a")
-            print(f"  hard_checks: missing_today_flag={missing_today_flag} phys_flag={phys_flag} (max_swe_mm={max_swe_mm:.0f})")
-            print(f"  nan_transition_flag={nan_transition_flag} dswe_flag={dswe_flag} pred_flag={pred_flag}")
+            print(f"  hard_checks: missing_today_flag={missing_today_flag} phys_flag={phys_flag} pred_flag={pred_flag} (max_swe_mm={max_swe_mm:.0f})")
             print("")
 
     df_qa = pd.DataFrame([qa])
@@ -1284,6 +1279,7 @@ def run_snowmodel_qa(
         min_abs_mm=min_abs_mm,
         min_rel=min_rel,
         max_swe_mm=max_swe_mm,
+        snow_present_mm=snow_present_mm,
     )
 
     df_simple = None
@@ -1309,17 +1305,11 @@ def run_snowmodel_qa(
 
             missing_today_flag = np.isnan(cur_val)
             phys_flag = (np.isfinite(cur_val) and ((cur_val < 0.0) or (cur_val > max_swe_mm)))
-            nan_transition_flag = (np.isnan(prev_val) and (not np.isnan(cur_val)))
 
-            dswe_flag = False
-            lo = hi = np.nan
-            if pil in hist_diff.columns and np.isfinite(dcur):
-                d = hist_diff[pil].to_numpy(float)
-                d = d[np.isfinite(d)]
-                if d.size >= 30:
-                    lo = float(np.quantile(d, q_lo))
-                    hi = float(np.quantile(d, q_hi))
-                    dswe_flag = (dcur < lo * engineering_buff) or (dcur > hi * engineering_buff)
+            # NOTE: nan_transition and dswe-envelope checks were previously computed here too.
+            # those generic data-integrity checks are now owned by qa_static only — keeping
+            # them duplicated in voting/snowmodel made the 2-of-3 majority vote deterministic
+            # on shared reasons. snowmodel now only acts on its unique pred-residual signal.
 
             pred_flag = False
             if (not missing_today_flag) and np.isfinite(thr):
@@ -1332,10 +1322,6 @@ def run_snowmodel_qa(
                 reason_code = "MISSING_TODAY"; reason_detail = "current SWE is NaN"
             elif phys_flag:
                 reason_code = "PHYS_LIMIT"; reason_detail = f"cur_mm={cur_val:.1f} outside [0,{max_swe_mm:.0f}]"
-            elif nan_transition_flag:
-                reason_code = "NAN_TRANSITION"; reason_detail = "prev was NaN, current finite"
-            elif dswe_flag:
-                reason_code = "DSWE_OUTLIER"; reason_detail = f"dSWE={dcur:.1f} outside hist_envelope"
             elif pred_flag:
                 resid = abs(cur_val - yhat) if (np.isfinite(cur_val) and np.isfinite(yhat)) else np.nan
                 reason_code = "PRED_RESID_TOO_LARGE"
@@ -1344,7 +1330,7 @@ def run_snowmodel_qa(
                 reason_code = "OK"; reason_detail = np.nan
 
             flag = int(df_qa_table[pil].values[0]) if pil in df_qa_table else int(
-                bool(missing_today_flag or phys_flag or nan_transition_flag or dswe_flag or pred_flag)
+                bool(missing_today_flag or phys_flag or pred_flag)
             )
 
             pred_used = pred_method
@@ -1387,12 +1373,8 @@ def run_snowmodel_qa(
                     "se_pred_mm": se_pred,
                     "sigma_mm": float(df_sigma[pil].values) if pil in df_sigma else np.nan,
                     "h0": float(df_h0[pil].values) if pil in df_h0 else np.nan,
-                    "hist_dq_lo": lo,
-                    "hist_dq_hi": hi,
                     "missing_today_flag": bool(missing_today_flag),
                     "phys_flag": bool(phys_flag),
-                    "nan_transition_flag": bool(nan_transition_flag),
-                    "dswe_flag": bool(dswe_flag),
                     "pred_flag": bool(pred_flag),
                     "flag": flag,
                     "reason_code": reason_code,

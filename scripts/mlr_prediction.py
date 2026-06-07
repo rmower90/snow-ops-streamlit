@@ -207,7 +207,8 @@ if __name__ =="__main__":
     elev_bin_labels, shape_fpath, demBin_fpath, aso_spatial_fpath, aso_tseries_fpath, snowmodel_dir, snodas_dir, insitu_dir, mlrPred_dir, shape_crs,cfg = load_aso_metadata(aso_site_name)
 
     # pillows to exclude from QA.
-    exclude_pillows = cfg['pillow_api']['exclude_pillows']
+    exclude_pillows = cfg['pillow_api'].get('exclude_pillows') or []
+    exclude_pillows_ranges = cfg['pillow_api'].get('exclude_pillows_ranges') or []
     elev_bin_edges_m, elev_bin_labels = metadata.get_elevation_bins(cfg)
     start_wy = int(cfg["aso_years"]["start"])
     end_wy = int(cfg["aso_years"]["end"])
@@ -319,12 +320,17 @@ if __name__ =="__main__":
         current_date_np = obs_data_test_lst[0].time[t_idx].values
         current_date = datetime(pd.to_datetime(current_date_np).year,pd.to_datetime(current_date_np).month,pd.to_datetime(current_date_np).day)
 
+        # build the per-day exclusion list (always-excluded + any active date-ranged entries).
+        pils_to_exclude_today = list(metadata.excluded_pillows_on(
+            current_date, exclude_pillows, exclude_pillows_ranges
+        ))
+
         current_vals_df,all_pils_QA,baseline_pils_,df_qa_table = preprocessing.process_daily_qa(
                                                                    t_idx,
                                                                    obs_data_test_lst_raw,
                                                                    obs_data_test_lst,
                                                                    baseline_pils,
-                                                                   exclude_pillows,
+                                                                   pils_to_exclude_today,
                                                                    printOutput = showOutput,
                                                                               )
 

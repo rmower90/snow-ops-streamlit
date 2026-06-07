@@ -92,6 +92,16 @@ for basin in "${BASINS[@]}"; do
     # node generateHTMLPred.js $basin --dropTrainInfer="drop NaNs"
     node "${script_dir}/generateHTMLPred.js" "$basin" --dropTrainInfer="drop NaNs"
 
+    # create per-basin Pillow QA Investigation page (basin_qa.html).
+    echo ""
+    echo "Generating QA html for basin: ${basin}"
+    node "${script_dir}/generateHTMLQA.js" "$basin"
+
+    # create per-basin SWE Volume by Elevation page (basin_swe_volume.html).
+    echo ""
+    echo "Generating SWE volume html for basin: ${basin}"
+    node "${script_dir}/generateHTMLSWE.js" "$basin"
+
 
     
     

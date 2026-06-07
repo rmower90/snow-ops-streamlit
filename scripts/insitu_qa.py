@@ -264,7 +264,12 @@ def run_pillow_qa(ds_raw: xr.Dataset,
                     pil_corr,
                     train_ds=train_ds,
                     test_ds=test_ds,              # ✅ now supported
-                    pred_method="seasonal",       # ✅ now supported: "base" | "seasonal" | "detrend"
+                    pred_method="base",           # base = OLS on swed_best/second/third only.
+                                                  # "seasonal" adds sin/cos(wDOY) terms but the
+                                                  # seasonal_gate flipping between base/seasonal
+                                                  # caused discontinuous jumps in yhat that don't
+                                                  # reflect real snowpack changes. base is smoother
+                                                  # and tracks the snowmodel grids directly.
                     season_period=365.25,
                     engineering_buff=engineering_buff__,
                     se_buff=se_buff__,
@@ -385,7 +390,11 @@ if __name__ =="__main__":
     elev_bin_labels, shape_fpath, demBin_fpath, aso_spatial_fpath, aso_tseries_fpath, snowmodel_dir, snodas_dir, insitu_dir, shape_crs, cfg = load_aso_metadata(aso_site_name)
 
     # pillows to exclude from QA.
-    exclude_pillows = cfg['pillow_api']['exclude_pillows']
+    exclude_pillows = cfg['pillow_api'].get('exclude_pillows') or []
+    exclude_pillows_ranges = cfg['pillow_api'].get('exclude_pillows_ranges') or []
+    # when True, the output NetCDF uses only the manual exclusion mask (no automated QA on top).
+    # the automated QA loop still runs so diagnostic PNGs are produced for comparison.
+    manual_qa_only = bool(cfg['pillow_api'].get('manual_qa_only', False))
 
     # load spatial data.
     aso_spatial_ds, aso_demBin_ds, shape_proj_gdf = load_aso_data(aso_spatial_fpath,
@@ -405,7 +414,27 @@ if __name__ =="__main__":
     obs_data_test_ds = xr.load_dataset(f'{insitu_dir}raw/{aso_site_name}_insitu_obs_daily_wy_2026.nc')
     # match times.
     obs_data_test_ds = obs_data_test_ds.sel(time = sm_test_ds.time)
+
+    # keep an UNMASKED copy for plotting only — the QA viz needs to display raw values
+    # inside manual exclusion windows so we can see why they were removed.
+    obs_data_test_ds_unmasked = obs_data_test_ds.copy(deep=True)
+
+    # mask excluded pillows in the QA-side dataset so they cannot inform other pillows' QA.
+    # always-excluded pillows are masked over the full time series; date-ranged entries
+    # are masked only within their window. qa_voting / qa_snowmodel pull buddy values from
+    # this dataset, so NaN-ing here removes them from buddy comparisons.
+    test_times = pd.to_datetime(obs_data_test_ds.time.values)
+    for i, t in enumerate(test_times):
+        drop = metadata.excluded_pillows_on(t, exclude_pillows, exclude_pillows_ranges)
+        for p in drop:
+            if p in obs_data_test_ds.data_vars:
+                obs_data_test_ds[p][i] = np.nan
     obs_data_test_lst = dataset_to_list(obs_data_test_ds)
+
+    # per-pillow window lookup so plotting can draw the 'Manual removed' band from config.
+    manual_windows_per_pillow = {}
+    for r in exclude_pillows_ranges:
+        manual_windows_per_pillow.setdefault(r['pillow'], []).append((r['start'], r['end']))
 
     pillows = list(obs_data_test_ds.data_vars)
     pillows = [i for i in pillows if i not in exclude_pillows]
@@ -415,6 +444,12 @@ if __name__ =="__main__":
     # pillows = [i for i in pillows if i not in exclude_pillows]
 
     historic_vals_df = qa_voting.create_qa_tables(obs_data_train_lst, [], isQA=False)
+    # drop excluded pillows from the historical buddy table so they cannot appear in any
+    # pillow's correlation rank (corr_rank). without this, qa_voting could still consult them
+    # as historical buddies even after the test-side mask above.
+    historic_vals_df = historic_vals_df.drop(
+        columns=[p for p in exclude_pillows if p in historic_vals_df.columns]
+    )
     
     corr_rank = qa_voting.build_corr_rank(
         historic_vals_df,
@@ -435,23 +470,40 @@ if __name__ =="__main__":
         corr_rank=corr_rank,
     )
 
-    # visualize QA results for ALL pillows.
-    for pil in obs_data_test_ds.data_vars:
+    # visualize QA results for ALL pillows. plots use the UNMASKED dataset so the raw line
+    # is fully drawn through manual exclusion windows, with the windows overlaid as a
+    # translucent 'Manual removed' band for visual comparison against automated QA flags.
+
+    # combined grid of all pillows in a single figure, saved as qa_viz_2026/all_pils.png
+    plotting.plot_all_pillows_qa_timeline(
+        ds_raw=obs_data_test_ds_unmasked,
+        df_simple=df_simple,
+        start="2025-10-01",
+        end=None,
+        manual_windows_per_pillow=manual_windows_per_pillow,
+        saveFIG=True,
+        figDIR=f'{insitu_dir}qa/qa_viz_2026/',
+        figFNAME='all_pils.png',
+        dpi=300,
+    )
+
+    for pil in obs_data_test_ds_unmasked.data_vars:
 
         out = plotting.plot_pillow_qa_timeline(
-        ds_raw=obs_data_test_ds,
+        ds_raw=obs_data_test_ds_unmasked,
         pillow=pil,
         df_simple=df_simple,
         ds_qa=None,
         start="2025-10-01",
         end=None,
+        manual_windows=manual_windows_per_pillow.get(pil, []),
         saveFIG = True,
         figDIR = f'{insitu_dir}qa/qa_viz_2026/'
     )
-    for pil in obs_data_test_ds.data_vars:
+    for pil in obs_data_test_ds_unmasked.data_vars:
     # static
         __ = plotting.plot_qa_method_diagnostics(
-        ds_raw=obs_data_test_ds,
+        ds_raw=obs_data_test_ds_unmasked,
         df_detail=df_detail,
         pillow=pil,
         ds_qa=None,               # or None
@@ -461,27 +513,29 @@ if __name__ =="__main__":
         start="2025-10-01",
         end=None,
         majority_df_simple=df_simple,   # optional
+        manual_windows=manual_windows_per_pillow.get(pil, []),
         saveFIG = True,
         figDIR = f'{insitu_dir}qa/qa_method_diagnostics_2026/'
         )
 
         # voting
         __ = plotting.plot_qa_method_diagnostics(
-        ds_raw=obs_data_test_ds,
+        ds_raw=obs_data_test_ds_unmasked,
         df_detail=df_detail,
         pillow=pil,
-        ds_qa=None, 
+        ds_qa=None,
         qa_method="voting",
         start="2025-10-01",
         end=None,
         majority_df_simple=df_simple,
+        manual_windows=manual_windows_per_pillow.get(pil, []),
         saveFIG = True,
         figDIR = f'{insitu_dir}qa/qa_method_diagnostics_2026/'
         )
 
         # snowmodel (+ show best/second/third from test_ds)
         __ = plotting.plot_qa_method_diagnostics(
-        ds_raw=obs_data_test_ds,
+        ds_raw=obs_data_test_ds_unmasked,
         df_detail=df_detail,
         pillow=pil,
         ds_qa=None,
@@ -490,6 +544,7 @@ if __name__ =="__main__":
         start="2025-10-01",
         end=None,
         majority_df_simple=df_simple,
+        manual_windows=manual_windows_per_pillow.get(pil, []),
         saveFIG = True,
         figDIR = f'{insitu_dir}qa/qa_method_diagnostics_2026/'
         )
@@ -497,16 +552,23 @@ if __name__ =="__main__":
     df_simple.to_csv(f'{insitu_dir}qa/insitu_qa_simple_wy_2026.csv',index = False)
     df_detail.to_csv(f'{insitu_dir}qa/insitu_qa_detail_wy_2026.csv',index = False)
 
-    # create updated majority QA dataset.
-    ds_majority = build_majority_qa_ds(
-        ds_raw=obs_data_test_ds,
-        df_simple=df_simple,
-        methods=("static","voting","snowmodel"),
-        require_all_methods=False,
-        persistence_days=3,   # <-- only mask if majority persists ≥ 3 consecutive days
-    )
-
-
+    # build the output NetCDF.
+    if manual_qa_only:
+        # only the manual exclusion mask is applied to the output; automated QA flags are
+        # produced for diagnostic plots but NOT used to mask the saved dataset.
+        print('MANUAL QA ONLY MODE: skipping automated QA mask; output reflects manual exclusions only.')
+        drop_cols = [p for p in exclude_pillows if p in obs_data_test_ds.data_vars]
+        ds_majority = obs_data_test_ds.drop_vars(drop_cols) if drop_cols else obs_data_test_ds
+        ds_majority.attrs['qa_method'] = 'manual_only'
+    else:
+        # standard flow: majority QA + persistence applied on top of the manual mask.
+        ds_majority = build_majority_qa_ds(
+            ds_raw=obs_data_test_ds,
+            df_simple=df_simple,
+            methods=("static","voting","snowmodel"),
+            require_all_methods=False,
+            persistence_days=3,   # <-- only mask if majority persists ≥ 3 consecutive days
+        )
 
     # Example save
     ds_majority.to_netcdf(f'{insitu_dir}processed/{aso_site_name}_insitu_obs_daily_wy_2026.nc')

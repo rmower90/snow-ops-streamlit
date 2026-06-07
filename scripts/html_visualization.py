@@ -259,6 +259,44 @@ def current_wy_aso(aso_site_name: str,
     else:
         return None, None
     
+def current_wy_aso_mean_elev(aso_site_name: str,
+                   water_year: int,
+                   aso_spatial_ds: xr.Dataset,
+                   dem_bin: xr.DataArray,
+                   aso_gdf_proj: gpd.GeoDataFrame,
+                   area_dict: dict,
+                   area_ref_dict: dict,
+                   ):
+    aso_eval_dir = f'/home/rossamower/work/aso/data/aso/{aso_site_name}/wy_{water_year}/raw/'
+    mean_swe = []
+    mean_swe_m = []
+    date_lst = []
+    all_lst = []
+
+    if os.path.exists(aso_eval_dir):
+        for file in os.listdir(aso_eval_dir):
+            print(file)
+            da = rxr.open_rasterio(aso_eval_dir + file).squeeze(drop = True)
+            for elev in range(dem_bin.elev.shape[0]):
+                elev_str = str(dem_bin.elev[elev].values)
+                print('Initial Shape:', da.shape)
+                aso_template = dem_bin[elev]
+                mask = (~aso_template.isnull()).values
+                aso_template = aso_template.rio.set_crs(da.rio.crs)
+                da_tu_domain = da.rio.clip(aso_gdf_proj.geometry).rio.reproject_match(aso_template).where(mask)
+                # print(area_ref_dict[elev_str])
+                mean_swe.append(float(da_tu_domain.mean()) * 3.28084 * area_dict[area_ref_dict[elev_str]])
+                mean_swe_m.append(float(da_tu_domain.mean()) * 1000)
+                date_lst.append(f'{file[-12:-8]}-{file[-8:-6]}-{file[-6:-4]}')
+                all_lst.append([f'{file[-12:-8]}-{file[-8:-6]}-{file[-6:-4]}',elev_str,float(da_tu_domain.mean()) * 3.28084 * area_dict[area_ref_dict[elev_str]]])
+    
+        mean_swe_arr = np.array(mean_swe)
+        date_arr = np.array(date_lst,dtype = np.datetime64)
+        return mean_swe_arr, date_arr,pd.DataFrame(all_lst,columns = ['Date','elev','mean_swe'])
+    else:
+        # no ASO flights for this WY yet — return empties so the call site can unpack 3 values.
+        return np.array([]), np.array([], dtype=np.datetime64), pd.DataFrame(columns=['Date','elev','mean_swe'])
+
 
 def get_default_settings():
     user_elevation_interval = -1
@@ -292,6 +330,28 @@ def load_snowtrax_uaswe(aso_site_name: str,
 
 
     return basin_wy.reset_index()
+
+def gen_area_ref_dict(dem_bin):
+    area_ref_dict = {}
+    for elev in dem_bin.dem_bin.elev.values:
+        if elev == '<7000':
+            val = '<7k'
+        elif elev == '7000-8000':
+            val = '7k-8k'
+        elif elev == '8000-9000':
+            val = '8k-9k'
+        elif elev == '9000-10000':
+            val = '9k-10k'
+        elif elev == '10000-11000':
+            val = '10k-11k'
+        elif elev == '11000-12000':
+            val = '11k-12k'
+        elif elev == '>12000':
+            val = '>12k'
+        elif elev == 'total':
+            val = 'Total'
+        area_ref_dict[str(elev)] = val
+    return area_ref_dict
 
 
 
@@ -331,12 +391,27 @@ if __name__ =="__main__":
     # area dict.
     area_dict = area_m2_acres(dem_bin.dem_bin,aso_spatial_ds,aso_site_name,applyMask = True)
 
-    # current wy aso.
+    # current wy aso - basin mean.
     current_swe, current_dates = current_wy_aso(aso_site_name,
                                                water_year,
                                                aso_spatial_ds,
                                                shape_proj_gdf,
                                                area_dict)
+    # current wy aso - SWE vol by elevation.
+    area_ref_dict = gen_area_ref_dict(dem_bin)
+
+    # NOTE: discard the per-elev mean_swe_arr/date_arr returned here — they have one
+    # entry per (flight, elev_bin) which would scatter-plot the wrong way on the time
+    # series. We only want aso_mean_swe_df; current_swe/current_dates above (basin-mean,
+    # one entry per flight) stay intact for the time series plot.
+    _, _, aso_mean_swe_df = current_wy_aso_mean_elev(aso_site_name,
+                                               water_year,
+                                               aso_spatial_ds,
+                                               dem_bin.dem_bin,
+                                               shape_proj_gdf,
+                                               area_dict,
+                                               area_ref_dict,
+                                               )
 
     # load insitu data.
     ## training.
@@ -423,6 +498,28 @@ if __name__ =="__main__":
             mlr_tables.append(prediction_pillows_df)
             mlr_identifiers[count] = [aso_stack_type, seasonal_dir, 'pillows']
             count += 1
+
+            # new swe volume by elevation plot — one PNG per ASO date for this (model, seasonality).
+            swe_vol_dir = f'{insitu_dir}swe_volume/'
+            if aso_mean_swe_df is not None and len(aso_mean_swe_df):
+                aso_dates = sorted(pd.to_datetime(aso_mean_swe_df['Date']).unique())
+                for aso_date in aso_dates:
+                    plotting.plot_swe_volume_by_elevation(
+                        aso_site_name=aso_site_name,
+                        comp_date=aso_date,
+                        aso_mean_swe_df=aso_mean_swe_df,
+                        uaswe_df=uaswe_df,
+                        snodas_df=snodas_df,
+                        sm_df=sm_df,
+                        prediction_acreFt_df=prediction_acreFt_df,
+                        aso_stack_type=aso_stack_type,
+                        seasonal_dir=seasonal_dir,
+                        area_ref_dict=area_ref_dict,
+                        figDIR=swe_vol_dir,
+                        saveFIG=True,
+                    )
+            else:
+                print(f'  no ASO flights for WY{water_year}; skipping SWE volume plots for {aso_stack_type}/{seasonal_dir}')
 
         print(mlr_identifiers)
         print(f'RUNNING MLR VISUALIZATION: {aso_site_name}; up to {str(obs_data_test_ds.time.values[-1])[0:10]}')
