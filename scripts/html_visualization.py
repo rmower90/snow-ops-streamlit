@@ -431,7 +431,9 @@ if __name__ =="__main__":
     # testing qa.
     obs_data_test_ds = xr.load_dataset(f'{insitu_dir}processed/{aso_site_name}_insitu_obs_daily_wy_2026.nc')
     # match times.
-    obs_data_test_ds = obs_data_test_ds.sel(time = sm_test_ds.time)
+    # obs_data_test_ds = obs_data_test_ds.sel(time = sm_test_ds.time)
+    common_t = np.intersect1d(obs_data_test_ds.time.values, sm_test_ds.time.values)
+    obs_data_test_ds = obs_data_test_ds.sel(time=common_t)
     obs_data_test_lst = dataset_to_list(obs_data_test_ds)
 
     # initial pillow list.

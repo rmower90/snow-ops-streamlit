@@ -22,6 +22,17 @@ import preprocessing as preprocessing
 import lm_model as lm_model
 import postprocessing as postprocessing
 
+# -------------------------------------------------------------------------
+# v5 experiment toggle: how ASO flights from the test water year are held out.
+#   'wy'     -- exclude the ENTIRE test WY from training (v1-v4 leave-one-year-out)
+#   'flight' -- include test WY flights in training, EXCEPT the specific flight date
+#               being predicted (leave-one-flight-out)
+# Set to 'wy' to revert to v1-v4 behavior.
+# Only mlr_prediction_historic.py reads this; the real-time mlr_prediction.py is
+# unaffected because preprocessing.train_test_split defaults to 'wy'.
+# -------------------------------------------------------------------------
+ASO_HOLDOUT_MODE = 'wy'
+
 
 def load_aso_metadata(aso_site_name: str,
                   config_dir: str = '/home/rossamower/work/aso/configs/',
@@ -221,7 +232,7 @@ if __name__ == "__main__":
                                                                                 shape_crs)
 
     # obs data.
-    obs_data = xr.load_dataset(f'{insitu_dir}processed/pillow_wy_1980_2025_qa1.nc')
+    obs_data = xr.load_dataset(f'{insitu_dir}processed/pillow_wy_1980_2025_qa6.nc')
     # obs test.
     obs_data_test_ds = obs_data.where(obs_data.time>=np.datetime64(f'{water_year-1}-10-01'), drop = True) \
                        .where(obs_data.time<np.datetime64(f'{water_year}-10-01'), drop = True)    
@@ -245,7 +256,24 @@ if __name__ == "__main__":
                                                                                                   obs_data_train_lst,
                                                                                                   water_year,
                                                                                                   isFriant = True,
+                                                                                                  aso_holdout_mode = ASO_HOLDOUT_MODE,
                                                                                                   )
+
+    # v5 (flight holdout): pre-compute the set of test-WY ASO flight dates so the
+    # daily loop can detect when today is one of them and exclude that single row
+    # from training. For 'wy' mode this set is empty and the loop short-circuits.
+    if ASO_HOLDOUT_MODE == 'flight':
+        wy_start_dt = np.datetime64(f'{water_year-1}-10-01')
+        wy_end_dt   = np.datetime64(f'{water_year}-10-01')
+        test_wy_flight_dates = set(
+            pd.Timestamp(d).normalize()
+            for d in aso_tseries_ds.date.values
+            if (wy_start_dt <= d < wy_end_dt)
+        )
+        print(f'v5 leave-one-flight-out: test-WY {water_year} flight dates = '
+              + ', '.join(d.strftime("%Y-%m-%d") for d in sorted(test_wy_flight_dates)))
+    else:
+        test_wy_flight_dates = set()
 
     df_sum_total = preprocessing.combine_aso_insitu(obs_data_train,
                          aso_tseries_train['aso_swe'],
@@ -316,23 +344,81 @@ if __name__ == "__main__":
                                                                 printOutput = showOutput,
                                                                             )
 
-        # Cache key: training depends only on which pillows are available
-        cache_key = (frozenset(all_pils_QA), frozenset(baseline_pils_))
+        # guard: if 0 usable pillows today, MLR cannot train (sklearn errors on
+        # shape=(_, 0) feature matrix). Skip the day -- the WY's CSV will simply
+        # be missing this row, which downstream code handles as a normal data gap.
+        if len(baseline_pils_) == 0 or len(all_pils_QA) == 0:
+            print(f'  {current_date}  SKIPPED -- 0 usable pillows today '
+                  f'(n_QA={len(all_pils_QA)}, n_baseline={len(baseline_pils_)})')
+            continue
+
+        # v5: determine if today is a test-WY flight date that must be excluded
+        # from training. In 'wy' mode test_wy_flight_dates is empty so this is None.
+        current_date_ts = pd.Timestamp(current_date).normalize()
+        excluded_flight = current_date_ts if current_date_ts in test_wy_flight_dates else None
+
+        # Build per-day training inputs. When excluding a flight, filter both the
+        # ASO time series and the df_sum_total table to drop that specific date.
+        # Do NOT dropna here: run_cross_val_selection2 has its own NaN filter
+        # (missing_times) that needs the NaN rows present in df_sum_total to
+        # correctly identify and exclude those flight dates from aso_tseries_2.
+        if excluded_flight is not None:
+            ex_date64 = np.datetime64(excluded_flight.strftime('%Y-%m-%d'))
+            aso_tseries_train_day = aso_tseries_train.where(aso_tseries_train.date != ex_date64, drop=True)
+            df_sum_total_day = df_sum_total[pd.to_datetime(df_sum_total['time']) != excluded_flight]
+            print(f'  {current_date}  v5: excluding flight date {excluded_flight.date()} from training')
+        else:
+            aso_tseries_train_day = aso_tseries_train
+            df_sum_total_day = df_sum_total
+
+        # combine_aso_insitu silently drops flights whose pillow row is too sparse
+        # (NaN-heavy) -- so a flight can exist in aso_tseries_train but be absent
+        # from df_sum_total. Downstream, run_cross_val_selection2's missing_times
+        # filter only inspects df_sum_total, so those "ghost" flights leak through
+        # to summarize_data and pull raw NaNs from the pillow time series.
+        # Intersect here so only flights matched in df_sum_total survive.
+        # In 'wy' mode this is a no-op (combine_aso_insitu was already given the
+        # post-train_test_split aso_tseries, so flights and df_sum_total agree).
+        df_times_np = pd.to_datetime(df_sum_total_day['time']).values.astype('datetime64[ns]')
+        pre_flights = aso_tseries_train_day.date.size
+        aso_tseries_train_day = aso_tseries_train_day.where(
+            aso_tseries_train_day.date.isin(df_times_np), drop=True)
+        dropped_flights = pre_flights - aso_tseries_train_day.date.size
+        if dropped_flights > 0:
+            print(f'  {current_date}  v5: dropped {dropped_flights} flight(s) from training (not matched in df_sum_total)')
+
+        # Cache key includes the excluded-flight date so each leave-one-flight-out
+        # variant gets its own trained model. Most days have excluded_flight=None
+        # and share one cache entry; only the ~5 test-WY flight days create new ones.
+        cache_key = (frozenset(all_pils_QA), frozenset(baseline_pils_), excluded_flight)
+        # v5: imputation cache must differ from v1-v4 cache (different df_sum_total
+        # because test-WY flights are now included) AND must differ per excluded
+        # flight date (each excluded flight produces a different df_sum_total).
+        # In 'wy' mode the suffix is '' so production cache filenames are unchanged.
+        if ASO_HOLDOUT_MODE == 'flight':
+            ex_tag = excluded_flight.strftime('%Y%m%d') if excluded_flight is not None else 'none'
+            impute_cache_suffix_ = f'_v5_excl{ex_tag}'
+        else:
+            impute_cache_suffix_ = ''
         if cache_key not in training_model_cache:
             print(f'  Training models for new pillow set (n_QA={len(all_pils_QA)}, n_baseline={len(baseline_pils_)})...')
             training_model_cache[cache_key] = lm_model.train_all_mlr_models(
-                aso_tseries_train.aso_swe, obs_data_qa, aso_site_name, all_pils, all_pils_QA,
-                df_sum_total, baseline_pils_, start_wy, end_wy, isSplit, isAccum,
+                aso_tseries_train_day.aso_swe, obs_data_qa, aso_site_name, all_pils, all_pils_QA,
+                df_sum_total_day, baseline_pils_, start_wy, end_wy, isSplit, isAccum,
                 mlrPred_dir, current_date, dem_bin.dem_bin, QA_flag=QA_flag,
                 modelNUM=model_num, isMean=False, showOutput=showOutput,
                 saveValidation=False, isCombination_=isCombination,
-                pillowImputation_=pillowImputation_, ds_snowmodel_=None)
+                pillowImputation_=pillowImputation_, ds_snowmodel_=None,
+                impute_cache_suffix=impute_cache_suffix_)
 
         try:
+            # v4 experiment: force the regression through the origin (yhat=0 when all
+            # selected pillows=0). Default in the real-time mlr_prediction.py is True.
             summary_dict_all,df_sheet_lst_mm,df_sheet_lst_acreFt,df_sheet_pillow_lst = lm_model.predict_with_cached_training(
                                                     training_model_cache[cache_key],
                                                     current_vals_df.reset_index(names = 'time'),
                                                     current_date, elev_bin_labels,
+                                                    fit_intercept=False,
                                                     )
 
             prediction_mm_df,prediction_acreFt_df,prediction_pillow_df = postprocessing.arrange_prediction_tables(df_sheet_lst_mm,

@@ -14,7 +14,16 @@ def train_test_split(aso_spatial_data: xr.Dataset,
                      insitu_data: list,
                      test_water_year: int,
                      isFriant = False,
+                     aso_holdout_mode: str = 'wy',
                     ):
+    """
+    aso_holdout_mode :
+      'wy'     (default) -- exclude ALL test-WY ASO flights from aso_tseries_train.
+                            Matches v1-v4 leave-one-year-out behavior.
+      'flight' -- KEEP test-WY ASO flights in aso_tseries_train. Caller is
+                  responsible for per-day exclusion of any individual flight
+                  date during the prediction loop (v5 leave-one-flight-out).
+    """
     # test dataset aso
     try:
         aso_spatial_test = aso_spatial_data.where(aso_spatial_data.date >= np.datetime64(f'{test_water_year-1}-10-01'),drop = True).where(aso_spatial_data.date < np.datetime64(f'{test_water_year}-10-01'),drop = True)
@@ -24,12 +33,18 @@ def train_test_split(aso_spatial_data: xr.Dataset,
         aso_tseries_test = None
 
     # train dataset aso
-    try:
-        aso_spatial_train = aso_spatial_data.where(~aso_spatial_data.date.isin(aso_spatial_test.date.values),drop = True)
-        aso_tseries_train = aso_tseries_data.where(~aso_tseries_data.date.isin(aso_tseries_test.date.values),drop = True)
-    except:
+    if aso_holdout_mode == 'flight':
+        # v5: keep test-WY flights in training; caller handles per-day filtering.
         aso_spatial_train = aso_spatial_data
         aso_tseries_train = aso_tseries_data
+    else:
+        # 'wy' default: exclude ALL test-WY flights (v1-v4 behavior).
+        try:
+            aso_spatial_train = aso_spatial_data.where(~aso_spatial_data.date.isin(aso_spatial_test.date.values),drop = True)
+            aso_tseries_train = aso_tseries_data.where(~aso_tseries_data.date.isin(aso_tseries_test.date.values),drop = True)
+        except:
+            aso_spatial_train = aso_spatial_data
+            aso_tseries_train = aso_tseries_data
 
     insitu_train = []
     insitu_test = []

@@ -176,7 +176,8 @@ def train_all_mlr_models(aso_tseries_1, obs_data_hist, aso_site_name, all_pils, 
                          prediction_dir, prediction_date, dem_bin, QA_flag='NA',
                          modelNUM=None, isMean=False, showOutput=False,
                          saveValidation=False, isCombination_=False,
-                         pillowImputation_=True, ds_snowmodel_=None):
+                         pillowImputation_=True, ds_snowmodel_=None,
+                         impute_cache_suffix=''):
     """
     Run cross-validation and station selection once for all (isImpute, elev_band) combos.
     Returns cached training artifacts that can be reused for daily predictions via
@@ -213,7 +214,7 @@ def train_all_mlr_models(aso_tseries_1, obs_data_hist, aso_site_name, all_pils, 
                 isMean, prediction_date, modelID, QA_flag, model_type='MLR',
                 showOutput=showOutput, isCombination=isCombination_,
                 saveValidation=saveValidation, pillowImputation=pillowImputation_,
-                ds_model=ds_snowmodel_)
+                ds_model=ds_snowmodel_, impute_cache_suffix=impute_cache_suffix)
 
             selected_pils = summary_dict_model[modelID]['model_features']['features']
             if showOutput: print('elev_band', elev_band, 'selected_pils', selected_pils)
@@ -235,7 +236,8 @@ def train_all_mlr_models(aso_tseries_1, obs_data_hist, aso_site_name, all_pils, 
 
 
 def predict_with_cached_training(training_cache, current_vals_df, prediction_date,
-                                 labels_from_yaml, add_zeroASO=True, pickledir=None):
+                                 labels_from_yaml, add_zeroASO=True, pickledir=None,
+                                 fit_intercept=True):
     """
     Use cached training state to make predictions for a single day.
 
@@ -276,12 +278,14 @@ def predict_with_cached_training(training_cache, current_vals_df, prediction_dat
         yhat_mm, df_train, yhat_test = run_daily_prediction(
             cached['df_split'], current_vals_df, cached['selected_pils'],
             modelID, conversion=0, area_m2=cached['area_m2'],
-            outdir=pickledir, add_zeroASO=add_zeroASO)
+            outdir=pickledir, add_zeroASO=add_zeroASO,
+            fit_intercept=fit_intercept)
         # predictions in acre ft
         yhat_acreft, df_train, yhat_test = run_daily_prediction(
             cached['df_split'], current_vals_df, cached['selected_pils'],
             modelID, conversion=2, area_m2=cached['area_m2'],
-            outdir=pickledir, add_zeroASO=add_zeroASO)
+            outdir=pickledir, add_zeroASO=add_zeroASO,
+            fit_intercept=fit_intercept)
 
         summary_dict_model[modelID]['prediction']['mm'].append(float(yhat_mm))
         summary_dict_model[modelID]['prediction']['acre_ft'].append(float(yhat_acreft))
@@ -342,7 +346,8 @@ def process_melt_accum_thresh(thresh_fpath,df_sum_total,elev_bin,isAccum):
 def run_mlr_train_predict(aso_tseries_1,obs_data_hist,elev_band,all_pils,all_pils_QA,df_sum_total,baseline_pils,start_wy,end_wy,
                          aso_site_name,isSplit,isAccum,isImpute,isMean,prediction_date,
                          modelID,QA_flag,model_type = 'MLR',showOutput = False,isCombination = False,
-                         saveValidation = False,pillowImputation = True,ds_model = None):
+                         saveValidation = False,pillowImputation = True,ds_model = None,
+                         impute_cache_suffix = ''):
     """
     Run single multiple linear regression cross validation and output results in dictionary.
     Input:
@@ -384,7 +389,7 @@ def run_mlr_train_predict(aso_tseries_1,obs_data_hist,elev_band,all_pils,all_pil
                 obs_data_5_,pils_removed,df_summary_impute = impute_pillow_mean(df_sum_total,all_pils_QA,obs_data_hist,obs_threshold = 0.50)
             else:
                 if pillowImputation:
-                    obs_data_5_,pils_removed,df_summary_impute = impute_pillow_prediction(df_sum_total,all_pils_QA,obs_data_hist,aso_site_name,prediction_date,obs_threshold = 0.50)
+                    obs_data_5_,pils_removed,df_summary_impute = impute_pillow_prediction(df_sum_total,all_pils_QA,obs_data_hist,aso_site_name,prediction_date,obs_threshold = 0.50, cache_suffix = impute_cache_suffix)
                 else:
                     obs_data_5_,pils_removed,df_summary_impute = impute_model_prediction(df_sum_total,all_pils_QA,obs_data_hist,
                                                                                          aso_site_name,prediction_date,
@@ -419,7 +424,7 @@ def run_mlr_train_predict(aso_tseries_1,obs_data_hist,elev_band,all_pils,all_pil
                 obs_data_5_,pils_removed,df_summary_impute = impute_pillow_mean(df_sum_total,all_pils_QA,obs_data_hist,obs_threshold = 0.50)
             else:
                 if pillowImputation:
-                    obs_data_5_,pils_removed,df_summary_impute = impute_pillow_prediction(df_sum_total,all_pils_QA,obs_data_hist,aso_site_name,prediction_date,obs_threshold = 0.50)
+                    obs_data_5_,pils_removed,df_summary_impute = impute_pillow_prediction(df_sum_total,all_pils_QA,obs_data_hist,aso_site_name,prediction_date,obs_threshold = 0.50, cache_suffix = impute_cache_suffix)
                 else:
                     obs_data_5_,pils_removed,df_summary_impute = impute_model_prediction(df_sum_total,all_pils_QA,obs_data_hist,
                                                                                          aso_site_name,prediction_date,
@@ -1137,7 +1142,8 @@ def impute_pillow_prediction(df_sum_total,
                              aso_site_name,
                              prediction_date,
                              obs_threshold = 0.50,
-                             saveImputeCSV = True):
+                             saveImputeCSV = True,
+                             cache_suffix = ''):
     """
         Fit a linear regression model
         Input:
@@ -1163,9 +1169,9 @@ def impute_pillow_prediction(df_sum_total,
         os.makedirs(f'/home/rossamower/work/aso/data/mlr_prediction/{aso_site_name}/imputation/')
         
     if prediction_date.month >= 10:
-        impute_df_fpath = f'/home/rossamower/work/aso/data/mlr_prediction/{aso_site_name}/imputation/pillow_impute_threePils_wy{prediction_date.year+1}.csv'
+        impute_df_fpath = f'/home/rossamower/work/aso/data/mlr_prediction/{aso_site_name}/imputation/pillow_impute_threePils_wy{prediction_date.year+1}{cache_suffix}.csv'
     else:
-        impute_df_fpath = f'/home/rossamower/work/aso/data/mlr_prediction/{aso_site_name}/imputation/pillow_impute_threePils_wy{prediction_date.year}.csv'
+        impute_df_fpath = f'/home/rossamower/work/aso/data/mlr_prediction/{aso_site_name}/imputation/pillow_impute_threePils_wy{prediction_date.year}{cache_suffix}.csv'
     ## if table does not exist.
     if not os.path.exists(impute_df_fpath) or (saveImputeCSV == False):
 
@@ -1643,7 +1649,8 @@ def create_directory(fpath):
 
 
 def run_daily_prediction(df_train,df_test,selected_pils,modelID,conversion = 0,
-                         area_m2 = None,outdir = None,add_zeroASO = True):
+                         area_m2 = None,outdir = None,add_zeroASO = True,
+                         fit_intercept = True):
     """
     Run daily prediction with selected features.
     Input:
@@ -1700,8 +1707,13 @@ def run_daily_prediction(df_train,df_test,selected_pils,modelID,conversion = 0,
     df_nan = df_nan.dropna(axis = 0)
 
 
-    lm = linear_model.LinearRegression()
-    lm1 = linear_model.LinearRegression()
+    # fit_intercept controls whether the regression is forced through the origin.
+    # Default True preserves the historical sklearn default. Pass fit_intercept=False
+    # to force yhat=0 when all selected pillows=0 (see v4 experiments in historic
+    # backtests). add_zeroASO=True is a soft anchor toward the origin via data
+    # augmentation; it's redundant under fit_intercept=False but harmless.
+    lm = linear_model.LinearRegression(fit_intercept=fit_intercept)
+    lm1 = linear_model.LinearRegression(fit_intercept=fit_intercept)
     # create prediction table.
     lm1.fit(df_nan[selected_pils].values,df_nan['aso_mean_bins_mm'].values)
     yhat_train = lm1.predict(df_nan[selected_pils].values)
