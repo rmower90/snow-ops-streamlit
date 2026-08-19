@@ -33,6 +33,25 @@ import postprocessing as postprocessing
 # -------------------------------------------------------------------------
 ASO_HOLDOUT_MODE = 'wy'
 
+# -------------------------------------------------------------------------
+# Which QA rung of the pillow ladder to train/test on.
+#
+# The imputation table is cached on disk keyed by (site, water year, suffix) ONLY, and the
+# read-back is unconditional -- once the file exists it is never recomputed, regardless of
+# whether the inputs changed. The tables under FRIANT/imputation/ were all written during
+# the v1 run (2026-03-07) from qa1 data, so v2-v6 reused them three months later even
+# though the qa ladder had changed the pillow record underneath: qa2 removed 36 flight-date
+# cells inside 2017-2025, qa3 interpolated 4 more, qa5 zero-filled 2, and qa3/qa6 together
+# changed 408 values inside the >= 2013 window that impute_pillow_prediction regresses on.
+# Result: the "predict NaNs" half of v2-v6 was imputed from qa1 while the "drop NaNs" half
+# correctly tracked the new data.
+#
+# Deriving the cache tag from the filename means changing the rung automatically re-keys
+# the cache, so this cannot silently recur. One table per rung, computed once, reused after.
+# -------------------------------------------------------------------------
+OBS_QA_FILE = 'pillow_wy_1980_2025_qa6.nc'
+OBS_QA_TAG = OBS_QA_FILE.replace('.nc', '').split('_')[-1]   # -> 'qa6'
+
 
 def load_aso_metadata(aso_site_name: str,
                   config_dir: str = '/home/rossamower/work/aso/configs/',
@@ -232,7 +251,7 @@ if __name__ == "__main__":
                                                                                 shape_crs)
 
     # obs data.
-    obs_data = xr.load_dataset(f'{insitu_dir}processed/pillow_wy_1980_2025_qa6.nc')
+    obs_data = xr.load_dataset(f'{insitu_dir}processed/{OBS_QA_FILE}')
     # obs test.
     obs_data_test_ds = obs_data.where(obs_data.time>=np.datetime64(f'{water_year-1}-10-01'), drop = True) \
                        .where(obs_data.time<np.datetime64(f'{water_year}-10-01'), drop = True)    
@@ -291,6 +310,19 @@ if __name__ == "__main__":
 
     impute_dir = f'{mlrPred_dir}imputation/'
     
+    # NOTE (deferred cleanup -- "option b"):
+    # All three return values here are discarded; nothing below reads them. What this call
+    # actually does is WRITE {impute_dir}/pillow_impute_threePils_wy{water_year}.csv, which
+    # lm_model.impute_pillow_prediction() then READS during training. So the writer lives in
+    # preprocessing and the reader lives in lm_model, as two near-duplicate implementations
+    # of the same triple-nested correlation search, and whichever creates the file first
+    # determines its contents.
+    #
+    # Now that the reader is keyed by OBS_QA_TAG, this writer still emits the UNSUFFIXED
+    # file on every run -- work whose output nothing consumes. Dropping the call is provably
+    # a no-op on results (returns unused), but it changes which files exist on disk, so it
+    # should be done deliberately and only after confirming the two implementations agree.
+    # Verify that first, then delete this call and de-duplicate the two functions.
     obs_data_impute,pils_removed,impute_na_df = preprocessing.imputation_w_pillows(df_sum_total,
                                                                                all_pils,
                                                                                obs_data_qa,
@@ -395,11 +427,13 @@ if __name__ == "__main__":
         # because test-WY flights are now included) AND must differ per excluded
         # flight date (each excluded flight produces a different df_sum_total).
         # In 'wy' mode the suffix is '' so production cache filenames are unchanged.
+        # the qa tag keys the cache to the pillow rung being used, so switching rungs no
+        # longer silently reuses the previous rung's imputation table.
         if ASO_HOLDOUT_MODE == 'flight':
             ex_tag = excluded_flight.strftime('%Y%m%d') if excluded_flight is not None else 'none'
-            impute_cache_suffix_ = f'_v5_excl{ex_tag}'
+            impute_cache_suffix_ = f'_{OBS_QA_TAG}_v5_excl{ex_tag}'
         else:
-            impute_cache_suffix_ = ''
+            impute_cache_suffix_ = f'_{OBS_QA_TAG}'
         if cache_key not in training_model_cache:
             print(f'  Training models for new pillow set (n_QA={len(all_pils_QA)}, n_baseline={len(baseline_pils_)})...')
             training_model_cache[cache_key] = lm_model.train_all_mlr_models(

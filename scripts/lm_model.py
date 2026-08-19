@@ -393,7 +393,8 @@ def run_mlr_train_predict(aso_tseries_1,obs_data_hist,elev_band,all_pils,all_pil
                 else:
                     obs_data_5_,pils_removed,df_summary_impute = impute_model_prediction(df_sum_total,all_pils_QA,obs_data_hist,
                                                                                          aso_site_name,prediction_date,
-                                                                                         obs_threshold = 0.50, ds_swed = ds_model)
+                                                                                         obs_threshold = 0.50, ds_swed = ds_model,
+                                                                                         cache_suffix = impute_cache_suffix)
 
             ## split up data into accumlation and melt.
             # df_split = process_melt_accum_thresh(f'./data/summary_table/{aso_site_name}/1000_ft/melt_threshold.csv',
@@ -428,7 +429,8 @@ def run_mlr_train_predict(aso_tseries_1,obs_data_hist,elev_band,all_pils,all_pil
                 else:
                     obs_data_5_,pils_removed,df_summary_impute = impute_model_prediction(df_sum_total,all_pils_QA,obs_data_hist,
                                                                                          aso_site_name,prediction_date,
-                                                                                         obs_threshold = 0.50, ds_swed = ds_model)
+                                                                                         obs_threshold = 0.50, ds_swed = ds_model,
+                                                                                         cache_suffix = impute_cache_suffix)
 
             # predictions_bestfit, predictions_validation, stations2, aso_tseries_2, obs_data_6 = run_cross_val_selection(obs_data_5_,df_summary_impute,aso_tseries_1,pils_removed,start_wy,end_wy,
             #                                                                                                              elev_band,isCombination = isCombination,showOutput = showOutput,isMelt = isSplit)
@@ -1173,7 +1175,30 @@ def impute_pillow_prediction(df_sum_total,
     else:
         impute_df_fpath = f'/home/rossamower/work/aso/data/mlr_prediction/{aso_site_name}/imputation/pillow_impute_threePils_wy{prediction_date.year}{cache_suffix}.csv'
     ## if table does not exist.
-    if not os.path.exists(impute_df_fpath) or (saveImputeCSV == False):
+    need_build = (not os.path.exists(impute_df_fpath)) or (saveImputeCSV == False)
+
+    # Coverage guard. pils_removed is recomputed from the CURRENT day's all_pils, but the
+    # cached table's columns are frozen at whatever availability existed when it was first
+    # written. When availability GROWS mid-run, the read-back loop below does
+    # `df_summary_impute[['time', pil_id]]` for a pillow the table never had, raising
+    # KeyError -- and this is called from train_all_mlr_models, which sits outside the
+    # try/except in both mlr_prediction.py and mlr_prediction_historic.py, so it kills the
+    # whole run rather than producing a NaN row.
+    # Observed: FRIANT wy2017, cache written 2016-10-02 without TNY (unavailable that day),
+    # then TNY reported on a later timestep -> KeyError on 'TNY'.
+    # Rebuilding on a coverage miss is monotonic: the table converges to the union of
+    # availability sets seen during the run, after which reads are satisfied.
+    if not need_build:
+        try:
+            cached_cols = set(pd.read_csv(impute_df_fpath, nrows=0).columns)
+        except Exception:
+            cached_cols = set()
+        absent = [p for p in pils_removed if p not in cached_cols]
+        if absent:
+            print(f'  imputation cache missing {absent} -- rebuilding {os.path.basename(impute_df_fpath)}')
+            need_build = True
+
+    if need_build:
 
         for pil in df_dropped_pils.columns:
             df_new = pd.DataFrame(df_dropped_pils[pil])
@@ -1338,6 +1363,7 @@ def impute_model_prediction(
     saveImputeCSV: bool = True,
     train_start_year: int = 2013,
     predictor_vars=("swed_best", "swed_second", "swed_third"),
+    cache_suffix: str = '',
 ):
     """
     Fit a linear regression model per pillow:
@@ -1373,14 +1399,31 @@ def impute_model_prediction(
     # Subset summary table to only pillows retained
     df_dropped_pils = df_sum_total[pils_removed].copy()
 
-    # Output CSV path
+    # Output CSV path. cache_suffix keys the table to the inputs it was built from -- see
+    # impute_pillow_prediction: this cache is read unconditionally once the file exists and
+    # is never invalidated, so without a suffix a stale table survives an input change.
+    # Defaults to '' so existing callers keep their current paths.
     if prediction_date.month >= 10:
-        impute_df_fpath = f'/home/rossamower/work/aso/data/mlr_prediction/{aso_site_name}/imputation/pillow_impute_threeSnowModelGrids_wy{prediction_date.year+1}.csv'
+        impute_df_fpath = f'/home/rossamower/work/aso/data/mlr_prediction/{aso_site_name}/imputation/pillow_impute_threeSnowModelGrids_wy{prediction_date.year+1}{cache_suffix}.csv'
     else:
-        impute_df_fpath = f'/home/rossamower/work/aso/data/mlr_prediction/{aso_site_name}/imputation/pillow_impute_threeSnowModelGrids_wy{prediction_date.year}.csv'
+        impute_df_fpath = f'/home/rossamower/work/aso/data/mlr_prediction/{aso_site_name}/imputation/pillow_impute_threeSnowModelGrids_wy{prediction_date.year}{cache_suffix}.csv'
 
     # --- 2) Build imputation table (or load it) ---
     need_build = (not os.path.exists(impute_df_fpath)) or (saveImputeCSV is False)
+
+    # Same coverage guard as impute_pillow_prediction: pils_removed tracks the current day's
+    # availability while the cached table's columns are frozen at first write, so a growing
+    # availability set otherwise raises KeyError in the consume loop below (row[pil_id]) from
+    # outside the callers' try/except, killing the run.
+    if not need_build:
+        try:
+            cached_cols = set(pd.read_csv(impute_df_fpath, nrows=0).columns)
+        except Exception:
+            cached_cols = set()
+        absent = [p for p in pils_removed if p not in cached_cols]
+        if absent:
+            print(f'  snowmodel imputation cache missing {absent} -- rebuilding {os.path.basename(impute_df_fpath)}')
+            need_build = True
 
     if need_build:
         # Ensure ds has required predictors
