@@ -159,7 +159,9 @@ def main():
                     help="historic uses 0 (force through origin); daily uses 1")
     ap.add_argument("--impute-cache-suffix", default="")
     ap.add_argument("--n-ensemble", type=int, default=None,
-                    help="only pass once predict_with_cached_training accepts it")
+                    help="1 = published path only (inert); >1 predicts with top-N combos")
+    ap.add_argument("--ranked-top-k", type=int, default=50,
+                    help="how many ranked combinations to retain per (isImpute, elev_band)")
     args = ap.parse_args()
 
     out = Path(args.out_dir) / f"{args.aso_site_name}_wy{args.water_year}" / args.label
@@ -175,7 +177,7 @@ def main():
         (0, False, True, None, None, None, 0, -1, 1)
 
     cache = {}
-    cache_rows = []
+    cache_rows, ens_rows = [], []
     # accumulated exactly as production does, so output matches prediction_*_combination.csv
     pred_mm_df = pred_af_df = pred_pil_df = None
 
@@ -203,7 +205,9 @@ def main():
                 modelNUM=model_num, isMean=False, showOutput=False,
                 saveValidation=False, isCombination_=isCombination,
                 pillowImputation_=bool(args.pillow_imputation), ds_snowmodel_=None,
-                impute_cache_suffix=args.impute_cache_suffix)
+                impute_cache_suffix=args.impute_cache_suffix,
+                capture_ranked=bool(args.n_ensemble and args.n_ensemble > 1),
+                ranked_top_k=args.ranked_top_k)
 
             # training artifacts most likely to shift silently under a change.
             # stats live under 'validation_stats' (regression_results, lm_model.py:1569).
@@ -223,7 +227,8 @@ def main():
                     "area_m2": c['area_m2'],
                 })
 
-        kw = {} if args.n_ensemble is None else {"n_ensemble": args.n_ensemble}
+        kw = {} if args.n_ensemble is None else {"n_ensemble": args.n_ensemble,
+                                                 "ensemble_sink": ens_rows}
         _, mm_l, af_l, pil_l = lm_model.predict_with_cached_training(
             cache[ck], cur_vals.reset_index(names='time'), current_date,
             P["elev_bin_labels"], fit_intercept=bool(args.fit_intercept), **kw)
@@ -234,6 +239,11 @@ def main():
         pred_mm_df, pred_af_df, pred_pil_df = postprocessing.arrange_prediction_tables(
             mm_l, af_l, pil_l, P["elev_bin_labels"], pred_mm_df, pred_af_df, pred_pil_df)
         print(f"  {current_date.date()}  key={digest}  n_QA={len(all_pils_QA)}")
+
+    if ens_rows:
+        e = pd.DataFrame(ens_rows).sort_values(
+            ["date", "isImpute", "elev_band", "rank"]).reset_index(drop=True)
+        e.to_csv(out / "ensemble_tidy.csv", index=False, float_format=FLOAT_FMT)
 
     for name, df in (("prediction_mm", pred_mm_df),
                      ("prediction_acreFt", pred_af_df),
@@ -251,7 +261,7 @@ def main():
         "pillow_imputation": args.pillow_imputation,
         "fit_intercept": args.fit_intercept,
         "impute_cache_suffix": args.impute_cache_suffix,
-        "n_ensemble": args.n_ensemble,
+        "n_ensemble": args.n_ensemble, "ranked_top_k": args.ranked_top_k,
         "sampled_indices": idxs, "distinct_cache_keys": len(cache),
     }, indent=2, sort_keys=True) + "\n")
 
