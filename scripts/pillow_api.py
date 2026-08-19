@@ -20,11 +20,23 @@ import ulmo
 import copy
 
 
+# CDEC sensor number -> column label used in the per-station wide frame.
+SENSOR_COLUMNS = {82: "SWE_ADJ", 3: "SWE"}
 
-def load_pillow_api(buff_geog, start_date, end_date, plot=True, daily_agg="mean", debug=False):
+
+def load_pillow_api(buff_geog, start_date, end_date, plot=True, daily_agg="mean", debug=False,
+                    sensor_priority=(82, 3)):
     """
-    Download SWE (prefers SWE_ADJ=82, fallback SWE=3) for stations in buff_geog.
+    Download SWE for stations in buff_geog.
     CSV-first, then JSON; robust datetime parsing; Series-safe selection.
+
+    sensor_priority: CDEC sensor numbers in preference order. Every listed sensor is
+      fetched, then combined ELEMENT-WISE -- for each day the value comes from the first
+      sensor that reported that day, so one station's series can mix sensors over time.
+      (82, 3) -> SWE_ADJ preferred, raw SWE filling its gaps  [default, legacy behavior]
+      (3,)    -> raw SWE only; days sensor 3 did not report stay NaN
+      Fetching the pure arms (82,) and (3,) separately lets any blend be reconstructed
+      offline without re-hitting CDEC.
 
     Returns:
       output: list[xr.DataArray] per station (daily, inches→mm, NaNs kept)
@@ -311,34 +323,41 @@ def load_pillow_api(buff_geog, start_date, end_date, plot=True, daily_agg="mean"
         p = CDECPointData(station, station)
 
         # CSV first (D→H), then JSON (D→H). Pick the first non-empty series.
-        s82 = first_nonempty_series([
-            fetch_csv_series(station, 82, "D"),
-            fetch_csv_series(station, 82, "H"),
-            fetch_json_series(station, 82, "D"),
-            fetch_json_series(station, 82, "H"),
-        ])
-        s3 = first_nonempty_series([
-            fetch_csv_series(station, 3, "D"),
-            fetch_csv_series(station, 3, "H"),
-            fetch_json_series(station, 3, "D"),
-            fetch_json_series(station, 3, "H"),
-        ])
+        # one waterfall (CSV D->H, then JSON D->H) per requested sensor.
+        series_by_sensor = {
+            sensor: first_nonempty_series([
+                fetch_csv_series(station, sensor, "D"),
+                fetch_csv_series(station, sensor, "H"),
+                fetch_json_series(station, sensor, "D"),
+                fetch_json_series(station, sensor, "H"),
+            ])
+            for sensor in sensor_priority
+        }
 
-        if not _series_usable(s82) and not _series_usable(s3):
+        if not any(_series_usable(s) for s in series_by_sensor.values()):
             skipped.append(station)
-            print(f"{station}: skipped (no rows from CSV/JSON for sensors 82/3)")
+            sensor_str = "/".join(str(s) for s in sensor_priority)
+            print(f"{station}: skipped (no rows from CSV/JSON for sensors {sensor_str})")
             if debug:
-                # one-shot debug: show CSV head for 82 daily to see columns quickly
-                probe_df = fetch_csv_raw(station, 82, start_date, end_date, "D")
+                # one-shot debug: show CSV head for the top-priority sensor, daily
+                probe_sensor = sensor_priority[0]
+                probe_df = fetch_csv_raw(station, probe_sensor, start_date, end_date, "D")
                 if isinstance(probe_df, pd.DataFrame):
-                    print(f"[DEBUG] {station} CSV head (82/D):\n{probe_df.head(3)}")
+                    print(f"[DEBUG] {station} CSV head ({probe_sensor}/D):\n{probe_df.head(3)}")
             continue
 
-        # wide daily (no pivot)
+        # wide daily (no pivot). one column per requested sensor, highest priority first,
+        # then an element-wise fallback down the priority order into SWE_clean.
         wide = pd.DataFrame(index=full_idx)
-        wide["SWE_ADJ"] = s82.reindex(full_idx) if _series_usable(s82) else np.nan
-        wide["SWE"]     = s3.reindex(full_idx)  if _series_usable(s3)  else np.nan
-        wide["SWE_clean"] = wide["SWE_ADJ"].combine_first(wide["SWE"])
+        for sensor in sensor_priority:
+            s = series_by_sensor[sensor]
+            col = SENSOR_COLUMNS.get(sensor, f"SENSOR_{sensor}")
+            wide[col] = s.reindex(full_idx) if _series_usable(s) else np.nan
+
+        clean = wide.iloc[:, 0]
+        for col in wide.columns[1:]:
+            clean = clean.combine_first(wide[col])
+        wide["SWE_clean"] = clean
 
         non_null = int(wide["SWE_clean"].notna().sum())
         print(f"{station}: {non_null} day(s) with SWE (after clean) | ", end="")

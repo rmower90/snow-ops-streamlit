@@ -7,3 +7,6 @@ __pycache__/
 config/regions_local/
 data/basins/USCASJ/aso/ASO_50M_SWE_SPATIAL.nc
 data/basins/USCASJ/aso/ASO_50M_PCDTM_USCASJ_bins_1000ft.nc
+
+# scratch plot output
+temp/
