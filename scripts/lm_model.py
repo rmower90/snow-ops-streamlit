@@ -1340,6 +1340,16 @@ def impute_pillow_prediction(df_sum_total,
                         first_corr[feat] = adjr2
 
                     # find max correlated pillow.
+                    # first_corr is empty when this row has NO valid pillows at all -- the
+                    # target is NaN and so is every potential predictor. There is nothing to
+                    # impute from, so leave the NaN in place; run_cross_val_selection2's
+                    # missing_times filter will drop the flight, which is the correct outcome.
+                    # All three levels of this search need the same guard: the third was
+                    # already wrapped in try/except, the second was fixed after FRIANT wy1989
+                    # crashed there, and wy1989 then crashed here on the retry. Patching one
+                    # level at a time just moves the failure.
+                    if not first_corr:
+                        continue
                     best_corr_pillow = max(first_corr, key=first_corr.get)
                     best_corr_adjr2 = first_corr[best_corr_pillow]
                     feature_list.append(best_corr_pillow)
