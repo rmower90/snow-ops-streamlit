@@ -1368,8 +1368,16 @@ def impute_pillow_prediction(df_sum_total,
                         second_corr[feat] = adjr2
 
                     # find max correlated pillow.
-                    second_corr_pillow = max(second_corr, key=second_corr.get)
-                    second_corr_adjr2 = second_corr[second_corr_pillow]
+                    # second_corr is empty when this flight row had exactly one valid pillow:
+                    # the best predictor was just removed from valid_pillows, leaving nothing
+                    # to search. max() then raises ValueError and, because this is reached
+                    # from train_all_mlr_models -- outside the try/except in both callers --
+                    # it kills the whole run. The third level below already guards for this;
+                    # the second did not. Observed on FRIANT wy1989.
+                    # Falling through with feature_list = [best_corr_pillow] is the same
+                    # behavior as second_corr_adjr2 <= best_corr_adjr2, i.e. keep one predictor.
+                    second_corr_pillow = max(second_corr, key=second_corr.get) if second_corr else None
+                    second_corr_adjr2 = second_corr[second_corr_pillow] if second_corr else -np.inf
                     if second_corr_adjr2 > best_corr_adjr2:
                         feature_list.append(second_corr_pillow)
 

@@ -262,8 +262,16 @@ def imputation_w_pillows(df_sum_total: pd.DataFrame,
                         second_corr[feat] = adjr2
 
                     # find max correlated pillow.
-                    second_corr_pillow = max(second_corr, key=second_corr.get)
-                    second_corr_adjr2 = second_corr[second_corr_pillow]
+                    # Same guard as lm_model.impute_pillow_prediction (these two functions are
+                    # near-duplicates): second_corr is empty when the row had exactly one valid
+                    # pillow, since the best predictor was just removed from valid_pillows.
+                    # max() would raise ValueError. The third level below already guards this.
+                    # This copy is normally called with all_pils rather than all_pils_QA, so it
+                    # sees a wider candidate set and is far less likely to hit the case -- but
+                    # the defect is identical. Falling through keeps one predictor, matching the
+                    # second_corr_adjr2 <= best_corr_adjr2 branch.
+                    second_corr_pillow = max(second_corr, key=second_corr.get) if second_corr else None
+                    second_corr_adjr2 = second_corr[second_corr_pillow] if second_corr else -np.inf
                     if second_corr_adjr2 > best_corr_adjr2:
                         feature_list.append(second_corr_pillow)
 
