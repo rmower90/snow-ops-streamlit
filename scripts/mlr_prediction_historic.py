@@ -69,7 +69,7 @@ OBS_QA_TAG = OBS_QA_FILE.replace('.nc', '').split('_')[-1]   # -> 'qa6'
 # prefix plus `_combination.csv`, and 3_MLR_Investigation.py globs prediction_mm_wy*.
 # A different leading token keeps the new file invisible to both.
 # -------------------------------------------------------------------------
-N_ENSEMBLE = 10
+N_ENSEMBLE = 1
 RANKED_TOP_K = N_ENSEMBLE
 
 
