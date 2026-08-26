@@ -1247,6 +1247,43 @@ def cross_val_loo(aso, index, add_points=None):
         output.extend(testy)
     return output
 
+def cross_val_loyo(aso, index):
+    """
+    Leave-one-YEAR-out predictions for a FIXED feature set.
+
+    Year-blocked counterpart to cross_val_loo, which holds out one FLIGHT at a time. ASO
+    flies several times per season (FRIANT: 31 flights across 8 years, ~3.9/year), and
+    snowpack is strongly autocorrelated within a season, so leaving out a single flight
+    leaves ~3 near-duplicate siblings from the same year in the training set. Any skill
+    statistic computed that way is optimistic; how optimistic is an empirical question.
+
+    Unlike cross_val_loyo_pred_select this does NO feature selection -- it scores the feature
+    set it is handed, which is what identify_best_stations needs when ranking candidates.
+
+    Input:
+        aso   - DataArray of ASO basin SWE with a 'date' coord.
+        index - 2D array (features x observations).
+    Output:
+        output - list of predictions, one per observation, each made by a model that never
+                 saw ANY flight from that observation's year.
+    """
+    years = np.array([int(aso[i].date.dt.year.values) for i in range(len(aso))])
+    output = np.full(len(aso), np.nan)
+    for y in np.unique(years):
+        te = np.where(years == y)[0]
+        tr = np.where(years != y)[0]
+        if len(tr) == 0:
+            continue
+        lm = linear_model.LinearRegression()
+        lm.fit(index[:, tr].T, aso.values[tr])
+        output[te] = lm.predict(index[:, te].T)
+    # a year with no training partners leaves NaN; fall back to the flight-wise value there
+    if np.isnan(output).any():
+        fb = np.array(cross_val_loo(aso, index))
+        output[np.isnan(output)] = fb[np.isnan(output)]
+    return list(output)
+
+
 def impute_pillow_prediction(df_sum_total,
                              all_pils,
                              obs_data_5,
