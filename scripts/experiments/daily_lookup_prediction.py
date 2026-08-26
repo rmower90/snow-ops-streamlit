@@ -68,8 +68,9 @@ import pandas as pd
 sys.path.insert(1, str(Path(__file__).resolve().parents[2] / "src"))
 sys.path.insert(1, str(Path(__file__).resolve().parent))
 
+from snow_ops.mlr.lookup import generation as gen                          # noqa: E402
+from snow_ops.mlr.lookup.frame import aso_band_labels                      # noqa: E402
 from snow_ops.mlr.lookup.prediction_result import build_prediction_result  # noqa: E402
-from build_all_bands import aso_band_labels                                # noqa: E402
 from historic_lookup_prediction import load_all_libraries, _git_state      # noqa: E402
 from mlr_ab_harness import replay_preprocessing                           # noqa: E402
 import preprocessing                                                       # noqa: E402
@@ -145,7 +146,9 @@ def run_daily_lookup(
 
 
 def save_outputs(basin: str, date_str: str, results: dict, bands: list[str],
-                 libraries_used: dict) -> Path:
+                 libraries_used: dict, *, run_version: str, library_version: str,
+                 mode: str, score_rule: str, qa_file: str,
+                 config_dir: str = "/home/rossamower/work/aso/configs/") -> Path:
     out_dir = Path(f"/home/rossamower/work/aso/data/mlr_prediction/{basin}/"
                    f"model_library/daily_lookup/{basin}_{date_str}")
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -159,10 +162,17 @@ def save_outputs(basin: str, date_str: str, results: dict, bands: list[str],
     results["selected_model"].to_csv(out_dir / "selected_model.csv", index=False, float_format="%.6f")
 
     repo_root = Path(__file__).resolve().parents[2]
+    git = _git_state(repo_root)
     manifest = {
-        "basin": basin, "date": date_str, "bands": bands,
+        # prediction-run identity -- decoupled from library identity on purpose: the
+        # daily job consumes a specified library without needing to know how it was
+        # trained (that is permanently recorded in the library's OWN manifest instead).
+        "run_id": run_version, "run_type": "daily",
+        "library_version": library_version,
+        "basin": basin, "date": date_str, "mode": mode, "score_rule": score_rule,
+        "qa_file": qa_file, "bands": bands,
         "built_at_utc": datetime.now(timezone.utc).isoformat(),
-        "git": _git_state(repo_root),
+        "git": git,
         "libraries_used": libraries_used,
         "n_available_pillows": len(results["available"]),
         "available_pillows": results["available"],
@@ -171,7 +181,15 @@ def save_outputs(basin: str, date_str: str, results: dict, bands: list[str],
                 "imputation, or cross-validation occurred. Parallel to, and does not "
                 "modify, mlr_prediction.py."),
     }
-    (out_dir / "run_manifest.json").write_text(json.dumps(manifest, indent=2, default=str) + "\n")
+    manifest_path = out_dir / "run_manifest.json"
+    manifest_path.write_text(json.dumps(manifest, indent=2, default=str) + "\n")
+
+    mlr_pred_dir = gen._mlr_pred_dir(basin, config_dir)
+    gen.append_prediction_run_registry_row(
+        mlr_pred_dir, run_version=run_version, run_type="daily", basin=basin,
+        library_version=library_version, wy_or_date=date_str,
+        status="completed", git_commit=git["commit"], git_dirty=git["dirty"],
+        manifest_path=str(manifest_path))
     return out_dir
 
 
@@ -181,6 +199,12 @@ def main() -> int:
     ap.add_argument("basin")
     ap.add_argument("water_year", type=int)
     ap.add_argument("date", help="YYYY-MM-DD")
+    ap.add_argument("--library-version", required=True,
+                    help="e.g. lookup_lib_v1 -- required, never inferred")
+    ap.add_argument("--run-version", required=True,
+                    help="e.g. lookup_daily_v1 -- required, never auto-incremented")
+    ap.add_argument("--mode", default="season", choices=["season"])
+    ap.add_argument("--score-rule", default="adj_r2")
     ap.add_argument("--bands", default="", help="comma-separated subset; default = all")
     ap.add_argument("--qa-file", default="pillow_wy_1980_2025_qa6.nc")
     ap.add_argument("--config-dir", default="/home/rossamower/work/aso/configs/")
@@ -191,15 +215,18 @@ def main() -> int:
              or aso_band_labels(args.basin, args.config_dir))
     t_all = time.perf_counter()
 
-    print(f"DAILY LOOKUP PREDICTION  {args.basin}  date={args.date}  bands={bands}")
+    print(f"DAILY LOOKUP PREDICTION  {args.basin}  date={args.date}  "
+          f"run={args.run_version} library={args.library_version}  bands={bands}")
 
-    baseline_libs, dropped_libs, t_load = load_all_libraries(args.basin, bands)
+    baseline_libs, dropped_libs, t_load = load_all_libraries(
+        args.basin, args.library_version, bands, config_dir=args.config_dir)
     print(f"  library load: {t_load:.2f}s "
           f"({len(bands)} baseline + {sum(len(v) for v in dropped_libs.values())} "
-          f"dropped-year libraries)")
+          f"dropped-year libraries, library_version={args.library_version})")
 
     results = run_daily_lookup(args.basin, args.water_year, args.date, bands,
-                               baseline_libs, dropped_libs, qa_file=args.qa_file)
+                               baseline_libs, dropped_libs, qa_file=args.qa_file,
+                               score_rule=args.score_rule)
     st = results["stats"]
     print(f"  daily QA/preprocessing: {st['t_qa']:.3f}s  "
           f"({len(results['available'])} pillows available)")
@@ -236,7 +263,7 @@ def main() -> int:
     for band in bands:
         direct = build_prediction_result(
             baseline_libs[band], dropped_libs[band], available2, values2,
-            basin=args.basin, band=band, date=args.date)
+            score_rule=args.score_rule, basin=args.basin, band=band, date=args.date)
         col = "Basin" if band == "total" else band
         table_val = bdf[col].iloc[0]
         ok = (pd.isna(table_val) if direct is None
@@ -295,7 +322,11 @@ def main() -> int:
             band: {"baseline_frame_id": baseline_libs[band].manifest["frame"]["frame_id"],
                   "dropped_years": sorted(dropped_libs[band])}
             for band in bands}
-        out_dir = save_outputs(args.basin, args.date, results, bands, libraries_used)
+        out_dir = save_outputs(
+            args.basin, args.date, results, bands, libraries_used,
+            run_version=args.run_version, library_version=args.library_version,
+            mode=args.mode, score_rule=args.score_rule, qa_file=args.qa_file,
+            config_dir=args.config_dir)
         print(f"\nOUTPUTS  {out_dir}")
         for f in sorted(out_dir.iterdir()):
             print(f"    {f.name:34s} {f.stat().st_size:>8,d} bytes")

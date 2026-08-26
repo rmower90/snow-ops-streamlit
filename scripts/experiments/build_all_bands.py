@@ -48,16 +48,10 @@ sys.path.insert(1, str(Path(__file__).resolve().parent))
 from snow_ops.mlr.lookup import frame as cf          # noqa: E402
 from snow_ops.mlr.lookup import fit as lf            # noqa: E402
 from snow_ops.mlr.lookup import store as ls          # noqa: E402
+from snow_ops.mlr.lookup.build import build_and_save_one  # noqa: E402
+from snow_ops.mlr.lookup.frame import aso_band_labels  # noqa: E402
 from snow_ops.mlr.lookup.query import ModelLibrary, model_pillows  # noqa: E402
 from build_model_library import reference_fit        # noqa: E402  (independent refit)
-
-import metadata  # noqa: E402
-
-
-def aso_band_labels(basin: str, config_dir: str) -> list[str]:
-    cfg = metadata.load_yaml(Path(config_dir) / "regions" / f"{basin}.yaml")
-    ds = xr.open_dataset(cfg["data_filepaths"]["aso_temporal"], engine="netcdf4")
-    return [str(v) for v in ds["elev"].values]
 
 
 def validate_band(frame, table, lib, *, n_refit: int, rng) -> list[tuple]:
@@ -139,20 +133,18 @@ def main() -> int:
 
     summary, all_ok, reference = [], True, None
     for band in bands:
-        t0 = time.perf_counter()
         print(f"--- {band} " + "-" * (68 - len(band)))
-        frame = cf.build_canonical_frame(
+        # Building AND saving here (rather than saving only after validation, as before)
+        # matches build_and_save_one's single responsibility -- the round-trip check below
+        # still verifies the save was faithful, it just no longer gates whether it happens.
+        result = build_and_save_one(
             args.basin, elev_band=band, mode=args.mode, obs_qa_file=args.qa_file,
-            library_id=args.library_id, config_dir=args.config_dir, verbose=False)
-        t_frame = time.perf_counter() - t0
+            library_id=args.library_id, config_dir=args.config_dir,
+            save=not args.dry_run, verbose=False)
+        frame, table, lib_manifest, lib = (
+            result["frame"], result["table"], result["lib_manifest"], result["lib"])
+        t_frame, t_fit = result["t_frame"], result["t_fit"]
         fm = frame.manifest
-
-        t0 = time.perf_counter()
-        table = lf.build_model_library(frame, verbose=False)
-        t_fit = time.perf_counter() - t0
-        lib_manifest = ls.build_library_manifest(
-            table, fm, max_pillows=fm["max_pillows"], build_seconds=t_fit)
-        lib = ModelLibrary(table=table, manifest=lib_manifest)
 
         checks = validate_band(frame, table, lib, n_refit=args.n_refit, rng=rng)
 
@@ -170,10 +162,8 @@ def main() -> int:
                            if same else "DIFFER"))
 
         if not args.dry_run:
-            w_frame = cf.save_canonical_frame(frame)
-            w_lib = ls.save_model_library(table, lib_manifest)
-            rt_f = cf.load_canonical_frame(w_frame["manifest"])
-            rt_l = ls.load_model_library(w_lib["manifest"])
+            rt_f = cf.load_canonical_frame(frame.manifest["paths"]["manifest"])
+            rt_l = ls.load_model_library(result["written"]["manifest"])
             cmp_cols = (["pillow_key", "pillow_mask", "n_predictors", "intercept",
                          "adj_r2", "rmse", "mae", "aicc", "bic"]
                         + [f"coef_{i}" for i in range(1, 6)])

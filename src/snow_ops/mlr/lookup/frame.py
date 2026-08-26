@@ -164,6 +164,25 @@ def _water_year(ts: pd.Timestamp) -> int:
     return int(ts.year) + 1 if int(ts.month) >= 10 else int(ts.year)
 
 
+def aso_band_labels(basin: str, config_dir: str) -> list[str]:
+    """ASO elevation-band labels for a basin, in ascending-elevation order (the last is
+    'total'), read directly from the ASO temporal file rather than assumed."""
+    import metadata
+    cfg = metadata.load_yaml(Path(config_dir) / "regions" / f"{basin}.yaml")
+    ds = xr.open_dataset(cfg["data_filepaths"]["aso_temporal"], engine="netcdf4")
+    return [str(v) for v in ds["elev"].values]
+
+
+def full_history_water_years(basin: str, config_dir: str) -> list[int]:
+    """Water years present in the full ASO flight record, computed directly from the ASO
+    temporal file rather than assumed from a prior build."""
+    import metadata
+    cfg = metadata.load_yaml(Path(config_dir) / "regions" / f"{basin}.yaml")
+    ds = xr.open_dataset(cfg["data_filepaths"]["aso_temporal"], engine="netcdf4")
+    dates = pd.to_datetime(ds["date"].values)
+    return sorted({_water_year(d) for d in dates})
+
+
 # ===========================================================================
 # the frame
 # ===========================================================================

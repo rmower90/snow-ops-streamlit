@@ -74,6 +74,8 @@ def main() -> int:
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("basin")
     ap.add_argument("water_year", type=int)
+    ap.add_argument("--library-version", required=True,
+                    help="e.g. lookup_lib_v1 -- required, never inferred")
     ap.add_argument("--bands", default="total,8000-9000")
     ap.add_argument("--dates", default="2025-04-01",
                     help="comma-separated YYYY-MM-DD, or empty to sample --n-dates")
@@ -94,8 +96,10 @@ def main() -> int:
     t0 = time.perf_counter()
     baseline_libs, dropped_libs = {}, {}
     for band in bands:
-        baseline_libs[band] = ls.load_model_library(find_manifest(args.basin, band, "all_years"))
-        dropped_libs[band] = load_dropped_year_libraries(args.basin, band)
+        baseline_libs[band] = ls.load_model_library(
+            find_manifest(args.basin, band, "all_years", args.library_version))
+        dropped_libs[band] = load_dropped_year_libraries(
+            args.basin, band, args.library_version)
     t_load = time.perf_counter() - t0
     print(f"  loaded {len(bands)} baseline + "
           f"{sum(len(v) for v in dropped_libs.values())} dropped-year libraries "

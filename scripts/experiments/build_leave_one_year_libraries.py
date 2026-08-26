@@ -47,25 +47,10 @@ sys.path.insert(1, str(Path(__file__).resolve().parent))
 from snow_ops.mlr.lookup import frame as cf                       # noqa: E402
 from snow_ops.mlr.lookup import fit as lf                          # noqa: E402
 from snow_ops.mlr.lookup import store as ls                        # noqa: E402
+from snow_ops.mlr.lookup.build import build_and_save_one           # noqa: E402
+from snow_ops.mlr.lookup.frame import aso_band_labels, full_history_water_years  # noqa: E402
 from snow_ops.mlr.lookup.query import ModelLibrary, model_pillows  # noqa: E402
 from build_model_library import reference_fit, brute_force_best    # noqa: E402
-
-import metadata  # noqa: E402
-
-
-def aso_band_labels(basin: str, config_dir: str) -> list[str]:
-    cfg = metadata.load_yaml(Path(config_dir) / "regions" / f"{basin}.yaml")
-    ds = xr.open_dataset(cfg["data_filepaths"]["aso_temporal"], engine="netcdf4")
-    return [str(v) for v in ds["elev"].values]
-
-
-def full_history_water_years(basin: str, config_dir: str) -> list[int]:
-    """Water years present in the full ASO flight record, computed directly from the ASO
-    temporal file rather than assumed from a prior build."""
-    cfg = metadata.load_yaml(Path(config_dir) / "regions" / f"{basin}.yaml")
-    ds = xr.open_dataset(cfg["data_filepaths"]["aso_temporal"], engine="netcdf4")
-    dates = pd.to_datetime(ds["date"].values)
-    return sorted({cf._water_year(d) for d in dates})
 
 
 def main() -> int:
@@ -99,28 +84,18 @@ def main() -> int:
 
     for band in bands:
         for wy in water_years:
-            t0 = time.perf_counter()
             library_id = f"drop_wy{wy}"
-            frame = cf.build_canonical_frame(
+            result = build_and_save_one(
                 args.basin, elev_band=band, mode=args.mode, obs_qa_file=args.qa_file,
-                excluded_years=[wy], library_id=library_id,
-                config_dir=args.config_dir, verbose=False)
-            t_frame = time.perf_counter() - t0
-
-            t1 = time.perf_counter()
-            table = lf.build_model_library(frame, verbose=False)
-            t_fit = time.perf_counter() - t1
+                excluded_years=[wy], library_id=library_id, config_dir=args.config_dir,
+                save=not args.dry_run, verbose=False)
+            frame, table, lib_manifest = (
+                result["frame"], result["table"], result["lib_manifest"])
+            t_frame, t_fit = result["t_frame"], result["t_fit"]
 
             fm = frame.manifest
             assert fm["excluded_years"] == [wy], \
                 f"manifest excluded_years {fm['excluded_years']} != [{wy}]"
-
-            lib_manifest = ls.build_library_manifest(
-                table, fm, max_pillows=fm["max_pillows"], build_seconds=t_fit)
-
-            if not args.dry_run:
-                cf.save_canonical_frame(frame)
-                ls.save_model_library(table, lib_manifest)
 
             best = lf.rank_frame(table, "adj_r2").iloc[0]
             records.append(dict(

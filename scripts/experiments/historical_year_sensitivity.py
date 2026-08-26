@@ -28,37 +28,30 @@ sys.path.insert(1, str(Path(__file__).resolve().parents[2] / "src"))
 sys.path.insert(1, str(Path(__file__).resolve().parent))
 
 from snow_ops.mlr.lookup import store as ls                              # noqa: E402
+from snow_ops.mlr.lookup import generation as gen                         # noqa: E402
 from snow_ops.mlr.lookup.historical_year import historical_year_sensitivity  # noqa: E402
 from mlr_ab_harness import replay_preprocessing, sample_indices           # noqa: E402
 import preprocessing                                                       # noqa: E402
 
 
-def _safe_band(band: str) -> str:
-    # Must match frame.py's _frame_id sanitization exactly, or a manifest glob silently
-    # matches nothing for any band label containing '/'. FRIANT's labels never do, but the
-    # two should not be allowed to drift apart.
-    return band.replace("<", "lt").replace(">", "gt").replace("/", "_")
+def find_manifest(basin: str, band: str, library_id: str, library_version: str,
+                  config_dir: str = "/home/rossamower/work/aso/configs/") -> Path:
+    """Resolve one library's manifest path via an EXPLICIT generation, never a glob.
+    library_id is currently always "all_years" here; kept as a parameter for symmetry
+    with load_dropped_year_libraries rather than hardcoding it at the call site."""
+    if library_id != "all_years":
+        raise ValueError(f"find_manifest only resolves the full-history unit; "
+                         f"got library_id={library_id!r}")
+    mlr_pred_dir = gen._mlr_pred_dir(basin, config_dir)
+    return gen.resolve_library_manifest_path(mlr_pred_dir, library_version, band)
 
 
-def find_manifest(basin: str, band: str, library_id: str) -> Path:
-    root = Path(f"/home/rossamower/work/aso/data/mlr_prediction/{basin}/model_library/manifests")
-    hits = sorted(root.glob(f"{basin}_season_{_safe_band(band)}_{library_id}_*_models.json"))
-    if not hits:
-        raise SystemExit(f"no library manifest for band={band!r} library_id={library_id!r} "
-                         f"under {root}. Run build_leave_one_year_libraries.py first.")
-    return hits[-1]
-
-
-def load_dropped_year_libraries(basin: str, band: str) -> dict[int, ls.ModelLibrary]:
-    root = Path(f"/home/rossamower/work/aso/data/mlr_prediction/{basin}/model_library/manifests")
-    out = {}
-    for mp in sorted(root.glob(f"{basin}_season_{_safe_band(band)}_drop_wy*_*_models.json")):
-        lib = ls.load_model_library(mp)
-        wy = lib.manifest["frame"]["excluded_years"]
-        if len(wy) != 1:
-            raise RuntimeError(f"{mp} has excluded_years={wy}, expected exactly one")
-        out[int(wy[0])] = lib
-    return out
+def load_dropped_year_libraries(basin: str, band: str, library_version: str,
+                                config_dir: str = "/home/rossamower/work/aso/configs/"
+                                ) -> dict[int, ls.ModelLibrary]:
+    mlr_pred_dir = gen._mlr_pred_dir(basin, config_dir)
+    paths = gen.resolve_dropped_year_manifest_paths(mlr_pred_dir, library_version, band)
+    return {wy: ls.load_model_library(mp) for wy, mp in paths.items()}
 
 
 def main() -> int:
@@ -66,6 +59,8 @@ def main() -> int:
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("basin")
     ap.add_argument("water_year", type=int)
+    ap.add_argument("--library-version", required=True,
+                    help="e.g. lookup_lib_v1 -- required, never inferred")
     ap.add_argument("--bands", default="total,8000-9000")
     ap.add_argument("--n-dates", type=int, default=3)
     ap.add_argument("--qa-file", default="pillow_wy_1980_2025_qa6.nc")
@@ -99,8 +94,10 @@ def main() -> int:
     all_rows = []
     baseline_libs, dropped_libs = {}, {}
     for band in bands:
-        baseline_libs[band] = ls.load_model_library(find_manifest(args.basin, band, "all_years"))
-        dropped_libs[band] = load_dropped_year_libraries(args.basin, band)
+        baseline_libs[band] = ls.load_model_library(
+            find_manifest(args.basin, band, "all_years", args.library_version))
+        dropped_libs[band] = load_dropped_year_libraries(
+            args.basin, band, args.library_version)
         for d in day_data:
             rows = historical_year_sensitivity(
                 baseline_libs[band], dropped_libs[band], d["available"], d["values"],

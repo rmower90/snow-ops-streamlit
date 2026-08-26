@@ -59,22 +59,34 @@ import pandas as pd
 sys.path.insert(1, str(Path(__file__).resolve().parents[2] / "src"))
 sys.path.insert(1, str(Path(__file__).resolve().parent))
 
+from snow_ops.mlr.lookup import generation as gen                           # noqa: E402
 from snow_ops.mlr.lookup import store as ls                                # noqa: E402
+from snow_ops.mlr.lookup.frame import aso_band_labels                      # noqa: E402
 from snow_ops.mlr.lookup.prediction_result import build_prediction_result  # noqa: E402
-from historical_year_sensitivity import find_manifest, load_dropped_year_libraries  # noqa: E402
-from build_all_bands import aso_band_labels                                # noqa: E402
 from mlr_ab_harness import replay_preprocessing                            # noqa: E402
 import preprocessing                                                        # noqa: E402
 
 
-def load_all_libraries(basin: str, bands: list[str]) -> tuple[dict, dict, float]:
-    """Read-only load of the already-built full-history + leave-one-year libraries.
-    Nothing is fit or rebuilt here."""
+def load_all_libraries(basin: str, library_version: str, bands: list[str],
+                      config_dir: str = "/home/rossamower/work/aso/configs/"
+                      ) -> tuple[dict, dict, float]:
+    """
+    Read-only load of the already-built full-history + leave-one-year libraries for one
+    EXPLICIT library generation. Nothing is fit or rebuilt here.
+
+    library_version is resolved via gen.load_generation_manifest() -- a deterministic path
+    built from the version string, never a directory glob -- so once multiple generations
+    coexist on disk, the wrong one can never be picked by lexicographic accident.
+    """
     t0 = time.perf_counter()
+    mlr_pred_dir = gen._mlr_pred_dir(basin, config_dir)
     baseline_libs, dropped_libs = {}, {}
     for band in bands:
-        baseline_libs[band] = ls.load_model_library(find_manifest(basin, band, "all_years"))
-        dropped_libs[band] = load_dropped_year_libraries(basin, band)
+        baseline_libs[band] = ls.load_model_library(
+            gen.resolve_library_manifest_path(mlr_pred_dir, library_version, band))
+        dropped_libs[band] = {
+            wy: ls.load_model_library(mp) for wy, mp in
+            gen.resolve_dropped_year_manifest_paths(mlr_pred_dir, library_version, band).items()}
     return baseline_libs, dropped_libs, time.perf_counter() - t0
 
 
@@ -183,7 +195,9 @@ def _git_state(repo_root: Path) -> dict:
 
 
 def save_outputs(basin: str, water_year: int, results: dict, bands: list[str],
-                 libraries_used: dict) -> Path:
+                 libraries_used: dict, *, run_version: str, library_version: str,
+                 mode: str, score_rule: str, qa_file: str,
+                 config_dir: str = "/home/rossamower/work/aso/configs/") -> Path:
     out_dir = Path(f"/home/rossamower/work/aso/data/mlr_prediction/{basin}/"
                    f"model_library/historic_lookup/{basin}_wy{water_year}")
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -197,10 +211,17 @@ def save_outputs(basin: str, water_year: int, results: dict, bands: list[str],
     results["selected_model"].to_csv(out_dir / "selected_model.csv", index=False, float_format="%.6f")
 
     repo_root = Path(__file__).resolve().parents[2]
+    git = _git_state(repo_root)
     manifest = {
-        "basin": basin, "water_year": water_year, "bands": bands,
+        # prediction-run identity -- run_version/library_version are the two axes this
+        # milestone exists to decouple: which run event this is, and which pretrained
+        # library it consumed. Neither is inferred; both were required CLI arguments.
+        "run_id": run_version, "run_type": "historic",
+        "library_version": library_version,
+        "basin": basin, "water_year": water_year, "mode": mode, "score_rule": score_rule,
+        "qa_file": qa_file, "bands": bands,
         "built_at_utc": datetime.now(timezone.utc).isoformat(),
-        "git": _git_state(repo_root),
+        "git": git,
         "libraries_used": libraries_used,
         "stats": results["stats"],
         "row_counts": {k: len(v) for k, v in results.items() if k != "stats"},
@@ -208,7 +229,15 @@ def save_outputs(basin: str, water_year: int, results: dict, bands: list[str],
                 "imputation, or cross-validation occurred. Parallel to, and does not "
                 "modify, mlr_prediction_historic.py."),
     }
-    (out_dir / "run_manifest.json").write_text(json.dumps(manifest, indent=2, default=str) + "\n")
+    manifest_path = out_dir / "run_manifest.json"
+    manifest_path.write_text(json.dumps(manifest, indent=2, default=str) + "\n")
+
+    mlr_pred_dir = gen._mlr_pred_dir(basin, config_dir)
+    gen.append_prediction_run_registry_row(
+        mlr_pred_dir, run_version=run_version, run_type="historic", basin=basin,
+        library_version=library_version, wy_or_date=str(water_year),
+        status="completed", git_commit=git["commit"], git_dirty=git["dirty"],
+        manifest_path=str(manifest_path))
     return out_dir
 
 
@@ -217,6 +246,12 @@ def main() -> int:
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("basin")
     ap.add_argument("water_year", type=int)
+    ap.add_argument("--library-version", required=True,
+                    help="e.g. lookup_lib_v1 -- required, never inferred")
+    ap.add_argument("--run-version", required=True,
+                    help="e.g. lookup_hist_v1 -- required, never auto-incremented")
+    ap.add_argument("--mode", default="season", choices=["season"])
+    ap.add_argument("--score-rule", default="adj_r2")
     ap.add_argument("--bands", default="", help="comma-separated subset; default = all")
     ap.add_argument("--qa-file", default="pillow_wy_1980_2025_qa6.nc")
     ap.add_argument("--start-date", default=None)
@@ -237,12 +272,14 @@ def main() -> int:
     t_all = time.perf_counter()
 
     print(f"HISTORIC LOOKUP PREDICTION  {args.basin} WY{args.water_year}  "
+          f"run={args.run_version} library={args.library_version}  "
           f"bands={bands}  qa={args.qa_file}")
 
-    baseline_libs, dropped_libs, t_load = load_all_libraries(args.basin, bands)
+    baseline_libs, dropped_libs, t_load = load_all_libraries(
+        args.basin, args.library_version, bands, config_dir=args.config_dir)
     print(f"  loaded {len(bands)} baseline + "
           f"{sum(len(v) for v in dropped_libs.values())} dropped-year libraries "
-          f"in {t_load:.2f}s")
+          f"in {t_load:.2f}s  (library_version={args.library_version})")
     libraries_used = {
         band: {"baseline_frame_id": baseline_libs[band].manifest["frame"]["frame_id"],
               "dropped_years": sorted(dropped_libs[band])}
@@ -250,7 +287,8 @@ def main() -> int:
 
     results = run_historic_lookup(
         args.basin, args.water_year, bands, baseline_libs, dropped_libs,
-        qa_file=args.qa_file, start_date=args.start_date, end_date=args.end_date)
+        qa_file=args.qa_file, start_date=args.start_date, end_date=args.end_date,
+        score_rule=args.score_rule)
 
     st = results["stats"]
     print(f"\n  {st['n_days_requested']} days requested "
@@ -362,7 +400,11 @@ def main() -> int:
     # ---------------------------------------------------------------- outputs
     out_dir = None
     if not args.dry_run:
-        out_dir = save_outputs(args.basin, args.water_year, results, bands, libraries_used)
+        out_dir = save_outputs(
+            args.basin, args.water_year, results, bands, libraries_used,
+            run_version=args.run_version, library_version=args.library_version,
+            mode=args.mode, score_rule=args.score_rule, qa_file=args.qa_file,
+            config_dir=args.config_dir)
         print(f"\nOUTPUTS  {out_dir}")
         for f in sorted(out_dir.iterdir()):
             print(f"    {f.name:34s} {f.stat().st_size:>10,d} bytes")
