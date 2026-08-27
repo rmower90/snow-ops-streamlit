@@ -211,7 +211,14 @@ def save_outputs(basin: str, water_year: int, results: dict, bands: list[str],
     results["selected_model"].to_csv(out_dir / "selected_model.csv", index=False, float_format="%.6f")
 
     repo_root = Path(__file__).resolve().parents[2]
-    git = _git_state(repo_root)
+    run_git = _git_state(repo_root)
+    mlr_pred_dir = gen._mlr_pred_dir(basin, config_dir)
+    # The library's own git identity -- when lookup_lib_vN was CUT -- read from its
+    # generation manifest, not re-derived. Kept separate from run_git below: a prediction
+    # run can consume a library built at a different, earlier code state, and conflating
+    # the two into one "git" block is exactly the ambiguity this is meant to remove.
+    library_git = gen.load_generation_manifest(mlr_pred_dir, library_version)["git"]
+
     manifest = {
         # prediction-run identity -- run_version/library_version are the two axes this
         # milestone exists to decouple: which run event this is, and which pretrained
@@ -221,7 +228,13 @@ def save_outputs(basin: str, water_year: int, results: dict, bands: list[str],
         "basin": basin, "water_year": water_year, "mode": mode, "score_rule": score_rule,
         "qa_file": qa_file, "bands": bands,
         "built_at_utc": datetime.now(timezone.utc).isoformat(),
-        "git": git,
+        # two distinct git identities -- see the module docstring on why these must not
+        # be merged into one "git" field. Per-artifact heterogeneity WITHIN the library
+        # (e.g. lookup_lib_v1's bootstrap provenance) is not repeated here; it stays
+        # reachable via library_version -> generation_manifest.json -> each member's own
+        # frame_manifest_path.
+        "library_generation_git": library_git,
+        "prediction_run_git": run_git,
         "libraries_used": libraries_used,
         "stats": results["stats"],
         "row_counts": {k: len(v) for k, v in results.items() if k != "stats"},
@@ -232,11 +245,11 @@ def save_outputs(basin: str, water_year: int, results: dict, bands: list[str],
     manifest_path = out_dir / "run_manifest.json"
     manifest_path.write_text(json.dumps(manifest, indent=2, default=str) + "\n")
 
-    mlr_pred_dir = gen._mlr_pred_dir(basin, config_dir)
     gen.append_prediction_run_registry_row(
         mlr_pred_dir, run_version=run_version, run_type="historic", basin=basin,
-        library_version=library_version, wy_or_date=str(water_year),
-        status="completed", git_commit=git["commit"], git_dirty=git["dirty"],
+        library_version=library_version, wy_or_date=str(water_year), status="completed",
+        library_git_commit=library_git["commit"], library_git_dirty=library_git["dirty"],
+        run_git_commit=run_git["commit"], run_git_dirty=run_git["dirty"],
         manifest_path=str(manifest_path))
     return out_dir
 

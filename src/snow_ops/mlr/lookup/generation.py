@@ -84,6 +84,48 @@ def expected_units(water_years: Iterable[int]) -> list[tuple[str, tuple[int, ...
     return units
 
 
+def is_working_tree_clean(repo_root: Path) -> tuple[bool, list[str]]:
+    """(is_clean, dirty_files). Used to gate real (non-dry-run) generation cuts: official
+    generations should be cut from a clean tree whenever possible, so a rebuilt-because-
+    config-changed library gets ONE coherent, clean commit rather than the bootstrap
+    generation's heterogeneous, build-then-commit provenance (see module docstring)."""
+    import subprocess
+    try:
+        status = subprocess.run(["git", "status", "--porcelain"], cwd=repo_root,
+                                capture_output=True, text=True, timeout=15,
+                                check=True).stdout
+    except Exception:
+        # Can't determine cleanliness -- fail closed (treat as dirty) rather than silently
+        # let an unverifiable tree state through the gate.
+        return False, ["<git status failed>"]
+    dirty_files = sorted(l[2:].strip() for l in status.splitlines() if l.strip())
+    return not dirty_files, dirty_files
+
+
+def artifact_git_states(manifest: dict) -> list[dict]:
+    """The distinct (commit, dirty) pairs recorded across a generation's member frame
+    manifests, with counts -- i.e. the per-artifact provenance the generation-level `git`
+    block does NOT capture (that block only records when the generation itself was cut).
+    Read-only: never modifies the underlying frame/library manifests."""
+    from collections import Counter
+    counts = Counter()
+    for band_units in manifest["members"].values():
+        for entry in band_units.values():
+            fm = json.loads(Path(entry["frame_manifest_path"]).read_text())
+            counts[(fm["git"]["commit"], fm["git"]["dirty"])] += 1
+    return [{"commit": c, "dirty": d, "count": n} for (c, d), n in counts.items()]
+
+
+def is_artifact_git_state_uniform(manifest: dict) -> bool:
+    """True iff every member artifact in this generation was built (or last saved) at the
+    exact same (commit, dirty) pair. False does not imply the DATA is wrong -- frame_id is
+    already a content hash of everything that defines the artifact -- it means the
+    generation was assembled from artifacts built across more than one code state, so the
+    generation's own top-level `git` block (when it was CUT) is not a substitute for each
+    member's own recorded provenance (see each member's frame_manifest_path)."""
+    return len(artifact_git_states(manifest)) <= 1
+
+
 # ===========================================================================
 # locating a single already-built unit, without fitting
 # ===========================================================================
@@ -137,6 +179,7 @@ def build_generation_manifest(
     bands: list[str] | None = None,
     obs_threshold: float = cf.DEFAULT_OBS_THRESHOLD, max_pillows: int = cf.MAX_PILLOWS,
     rebuild: bool = False, rebuild_imputation: bool = False,
+    generation_status: str = "official",
     verbose: bool = True,
 ) -> tuple[dict, list[str]]:
     """
@@ -149,6 +192,12 @@ def build_generation_manifest(
     rebuild=True: missing (or, if rebuild_imputation, all) units are actually built via
     build_and_save_one() -- this is the path a future lookup_lib_v2 with a changed
     configuration would use.
+
+    generation_status: "official" (default) or "bootstrap". Purely descriptive metadata --
+    does not change what gets built or how units are resolved. Use "bootstrap" for a
+    generation cut before/without the clean-tree guarantee (see is_working_tree_clean());
+    "official" generations should be cut from a clean tree (enforced by
+    build_library_generation.py, not here -- this function has no side effects to gate).
 
     Returns (manifest, problems). problems is empty iff the generation is complete and
     internally consistent; the caller decides whether to save on that basis.
@@ -216,6 +265,7 @@ def build_generation_manifest(
     manifest = {
         "generation_schema_version": GENERATION_SCHEMA_VERSION,
         "library_version": library_version,
+        "generation_status": generation_status,
         "basin": basin, "mode": mode, "obs_qa_file": obs_qa_file, "qa_tag": qa_tag,
         "bands": bands, "water_years": water_years,
         "obs_threshold": obs_threshold, "max_pillows": max_pillows,
@@ -227,6 +277,9 @@ def build_generation_manifest(
         "complete": not problems,
         "problems": problems,
     }
+    if manifest["complete"]:
+        manifest["artifact_git_states_uniform"] = is_artifact_git_state_uniform(manifest)
+        manifest["artifact_git_states"] = artifact_git_states(manifest)
     return manifest, problems
 
 
@@ -259,6 +312,25 @@ def save_generation_manifest(manifest: dict, mlr_pred_dir: Path) -> Path:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(manifest, indent=2, sort_keys=True, default=str) + "\n")
     return path
+
+
+def annotate_generation_status(mlr_pred_dir: Path, library_version: str,
+                               generation_status: str) -> dict:
+    """
+    In-place metadata amendment for an EXISTING generation manifest -- adds/refreshes only
+    `generation_status` and `artifact_git_states_uniform`/`artifact_git_states`. Every
+    other field (git, built_at_utc, members, convention, ...) is left byte-for-byte as it
+    was: this does not re-locate units, re-verify anything against disk, or touch a single
+    per-artifact frame/library manifest. Use this for a generation that was already cut
+    (e.g. lookup_lib_v1) and needs its bootstrap status recorded without pretending it was
+    re-cut at a later, unrelated commit.
+    """
+    manifest = load_generation_manifest(mlr_pred_dir, library_version)
+    manifest["generation_status"] = generation_status
+    manifest["artifact_git_states_uniform"] = is_artifact_git_state_uniform(manifest)
+    manifest["artifact_git_states"] = artifact_git_states(manifest)
+    save_generation_manifest(manifest, mlr_pred_dir)
+    return manifest
 
 
 # ===========================================================================
@@ -347,14 +419,27 @@ def prediction_run_registry_path(mlr_pred_dir: Path) -> Path:
 
 def append_prediction_run_registry_row(mlr_pred_dir: Path, *, run_version: str,
                                        run_type: str, basin: str, library_version: str,
-                                       wy_or_date: str, status: str, git_commit: str,
-                                       git_dirty: bool, manifest_path: str) -> Path:
+                                       wy_or_date: str, status: str,
+                                       library_git_commit: str, library_git_dirty: bool,
+                                       run_git_commit: str, run_git_dirty: bool,
+                                       manifest_path: str) -> Path:
+    """
+    Two DISTINCT git identities per row, never conflated: library_git_* is the git state
+    recorded on the CONSUMED generation's own manifest (when lookup_lib_vN was cut);
+    run_git_* is this prediction run's own code state. A library_version can be (and for
+    lookup_lib_v1, is) built from artifacts whose OWN per-unit git state varies further
+    still -- that heterogeneity is not repeated here; it stays reachable hierarchically by
+    following library_version -> generation_manifest.json -> each member's
+    frame_manifest_path, exactly where it was recorded originally.
+    """
     path = prediction_run_registry_path(mlr_pred_dir)
     _append_csv_row(path, {
         "run_version": run_version, "run_type": run_type, "basin": basin,
         "library_version": library_version, "wy_or_date": wy_or_date,
         "submitted_at_utc": datetime.now(timezone.utc).isoformat(),
-        "status": status, "git_commit": git_commit, "git_dirty": git_dirty,
+        "status": status,
+        "library_git_commit": library_git_commit, "library_git_dirty": library_git_dirty,
+        "run_git_commit": run_git_commit, "run_git_dirty": run_git_dirty,
         "manifest_path": manifest_path,
     })
     return path

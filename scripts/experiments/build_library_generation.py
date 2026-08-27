@@ -51,6 +51,16 @@ def main() -> int:
     ap.add_argument("--rebuild", action="store_true",
                     help="fit any missing unit rather than requiring it already exist")
     ap.add_argument("--rebuild-imputation", action="store_true")
+    ap.add_argument("--generation-status", default="official",
+                    choices=["official", "bootstrap"],
+                    help="official generations should be cut from a clean tree "
+                         "(see --allow-dirty); bootstrap is for cuts made before/without "
+                         "that guarantee")
+    ap.add_argument("--allow-dirty", action="store_true",
+                    help="cut anyway from a dirty working tree. Without this, a real "
+                         "(non-dry-run) cut refuses to save unless the tree is clean -- "
+                         "an official generation should be traceable to one committed "
+                         "code state, not a mix of uncommitted edits")
     ap.add_argument("--dry-run", action="store_true",
                     help="assemble and print the manifest; do not write it or the registry")
     args = ap.parse_args()
@@ -65,11 +75,18 @@ def main() -> int:
         args.basin, args.library_version, mode=args.mode, obs_qa_file=args.qa_file,
         config_dir=args.config_dir, bands=bands, obs_threshold=args.obs_threshold,
         max_pillows=args.max_pillows, rebuild=args.rebuild,
-        rebuild_imputation=args.rebuild_imputation, verbose=True)
+        rebuild_imputation=args.rebuild_imputation,
+        generation_status=args.generation_status, verbose=True)
 
     print(f"\n  units: {manifest['n_units_total']} / {manifest['n_units_expected']} "
           f"({manifest['n_bands']} bands x {manifest['n_units_per_band']} units/band)")
     print(f"  convention: {manifest['convention']}")
+    if manifest.get("complete"):
+        print(f"  artifact_git_states_uniform: {manifest['artifact_git_states_uniform']}")
+        if not manifest["artifact_git_states_uniform"]:
+            print(f"    (member artifacts were built/saved at "
+                  f"{len(manifest['artifact_git_states'])} distinct commit/dirty states -- "
+                  f"see artifact_git_states in the manifest)")
 
     if problems:
         print(f"\n  {len(problems)} PROBLEM(S) -- generation is INCOMPLETE:")
@@ -88,6 +105,18 @@ def main() -> int:
         return 1
 
     repo_root = Path(__file__).resolve().parents[2]
+
+    if args.generation_status == "official" and not args.allow_dirty:
+        clean, dirty_files = gen.is_working_tree_clean(repo_root)
+        if not clean:
+            print(f"\n  refusing to cut an OFFICIAL generation from a dirty working tree "
+                 f"({len(dirty_files)} dirty file(s)):")
+            for f in dirty_files:
+                print(f"    - {f}")
+            print("  commit first, or pass --generation-status bootstrap, or pass "
+                 "--allow-dirty to cut anyway.")
+            return 1
+
     manifest = gen.finalize_generation_manifest(manifest, repo_root)
     mlr_pred_dir = gen._mlr_pred_dir(args.basin, args.config_dir)
     written = gen.save_generation_manifest(manifest, mlr_pred_dir)
