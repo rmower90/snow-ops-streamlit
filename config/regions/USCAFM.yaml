@@ -1,0 +1,18 @@
+name: Feather
+abreviation: USCAFM
+crs:
+  epsg: 32610
+elevation:
+  unit: ft        # source unit for edges
+  bins:
+    labels: ["<4k", "4k-5k", "5k-6k", "6k-7k", ">7k"]
+    edges:        # same length = len(labels)+1; -inf/+inf allowed
+      - -inf
+      - 4000
+      - 5000
+      - 6000
+      - 7000
+      - +inf
+aso_years:
+  start: 2022
+  end: 2025

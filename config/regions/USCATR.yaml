@@ -1,0 +1,20 @@
+name: Truckee
+abreviation: USCATR
+crs:
+  epsg: 32610
+elevation:
+  unit: ft        # source unit for edges
+  bins:
+    labels: ["<6k", "6k-7k", "7k-8k", "8k-9k", ">9k"]
+    edges:        # same length = len(labels)+1; -inf/+inf allowed
+      - -inf
+      - 6000
+      - 7000
+      - 8000
+      - 9000
+      - +inf
+aso_years:
+  start: 2022
+  end: 2025
+nan_thresh:
+    3m: 3

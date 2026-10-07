@@ -1,0 +1,21 @@
+name: Dolores
+abreviation: USCODO
+crs:
+  epsg: 32612
+elevation:
+  unit: ft        # source unit for edges
+  bins:
+    labels: ["<8k","8k-9k", "9k-10k","10k-11k", "11k-12k", ">12k"]
+    edges:        # same length = len(labels)+1; -inf/+inf allowed
+      - -inf
+      - 8000
+      - 9000
+      - 10000
+      - 11000
+      - 12000
+      - +inf
+aso_years:
+  start: 2021
+  end: 2025
+nan_thresh:
+    3m: 3

@@ -1,0 +1,18 @@
+name: Conejos
+abreviation: USCOCJ
+crs:
+  epsg: 32613
+elevation:
+  unit: ft        # source unit for edges
+  bins:
+    labels: ["<9k", "9k-10k","10k-11k", "11k-12k", ">12k"]
+    edges:        # same length = len(labels)+1; -inf/+inf allowed
+      - -inf
+      - 9000
+      - 10000
+      - 11000
+      - 12000
+      - +inf
+aso_years:
+  start: 2018
+  end: 2025

@@ -10,3 +10,6 @@ data/basins/USCASJ/aso/ASO_50M_PCDTM_USCASJ_bins_1000ft.nc
 
 # scratch plot output
 temp/
+
+# jupyter checkpoint copies of region configs
+.ipynb_checkpoints/
