@@ -418,23 +418,20 @@ def download_snodas_daily_data(year: str,
        df_todo['date'] = pd.to_datetime(df_todo['date'])
        dates = df_todo['date'].values
 
-    if int(month) >= 10:
-       water_year = str(int(year) + 1)
-    else:
-       water_year = year
-     
     raw_dir = f'{base_out_dir}raw_conus_files/'
-    nc_dir = f'{base_out_dir}nc_conus_files/'
+    nc_dir_base = f'{base_out_dir}nc_conus_files/'
 
     cwd_base = os.getcwd()
 
     # make directories if they do not exist.
     if not os.path.exists(raw_dir): os.makedirs(raw_dir)
-    if not os.path.exists(nc_dir): os.makedirs(nc_dir)
+    if not os.path.exists(nc_dir_base): os.makedirs(nc_dir_base)
 
-    # create water year directory.
-    nc_dir = f'{nc_dir}wy_{water_year}/'
-    if not os.path.exists(nc_dir): os.makedirs(nc_dir)
+    # NOTE: the water year directory is deliberately NOT fixed here. It used to come from
+    # the run date (argv month/year), which files every downloaded day under the water year
+    # the *run* falls in -- so a backfill executed on or after Oct 1 wrote WY-N days into
+    # wy_(N+1), where snodas_basin_process.py (which reads wy_2026) never finds them.
+    # It is computed per date in the download loop instead.
 
     if isMultipleDates == False:
         start = np.datetime64(f'{year}-{pad_zero(month)}-{pad_zero(day)}')
@@ -451,6 +448,12 @@ def download_snodas_daily_data(year: str,
     date_no_hyphen = [i.replace('-','') for i in date_str]
     
     for download_date in range(0,len(date_no_hyphen)):
+        # water year of the DATE BEING PROCESSED, not of the run.
+        _d = date_no_hyphen[download_date]
+        _wy = str(int(_d[0:4]) + 1) if int(_d[4:6]) >= 10 else _d[0:4]
+        nc_dir = f'{nc_dir_base}wy_{_wy}/'
+        if not os.path.exists(nc_dir): os.makedirs(nc_dir)
+
         download_directory = f'{raw_dir}{date_no_hyphen[download_date]}'
         print(date_no_hyphen[download_date])
         print(download_directory)
@@ -490,11 +493,22 @@ def download_snodas_daily_data(year: str,
     return
 
 def check_mismatching_dates(df,conus_dir):
+    # conus_dir may be the nc_conus_files/ base (holding wy_* subdirectories) or a single
+    # wy_ directory. Scanning only one water year would make every date outside it look
+    # missing, so the checklist would be truncated and those days re-downloaded forever --
+    # which is exactly what a hardcoded wy_2026 did once downloads started landing in the
+    # correct water year.
+    scan_dirs = sorted(
+        os.path.join(conus_dir, d) for d in os.listdir(conus_dir)
+        if d.startswith('wy_') and os.path.isdir(os.path.join(conus_dir, d))
+    ) or [conus_dir]
+
     date_lst = []
-    for file in os.listdir(conus_dir):
-        if file.endswith('.nc'):
-            date = file.split('_')[1].split('.')[0]
-            date_lst.append(f'{date[0:4]}-{date[4:6]}-{date[6:8]}')
+    for d in scan_dirs:
+        for file in os.listdir(d):
+            if file.endswith('.nc'):
+                date = file.split('_')[1].split('.')[0]
+                date_lst.append(f'{date[0:4]}-{date[4:6]}-{date[6:8]}')
     
     df_dir = pd.DataFrame(data = sorted(date_lst),
                       columns = ['download_date'])
@@ -570,7 +584,7 @@ if __name__ =="__main__":
         year = sys.argv[1]
         month = sys.argv[2]
         day = sys.argv[3]
-        generate_snodas_download_todolist(year,month,day,'/home/rossamower/work/aso/data/snodas/CONUS/nc_conus_files/wy_2026/')
+        generate_snodas_download_todolist(year,month,day,'/home/rossamower/work/aso/data/snodas/CONUS/nc_conus_files/')
         
         download_snodas_daily_data(year,
                                    month,
