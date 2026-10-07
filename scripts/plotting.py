@@ -795,6 +795,7 @@ def plot_pillow_qa_timeline(
     pillow: str,
     df_simple: pd.DataFrame,
     ds_qa: "xr.Dataset" = None,
+    qa_label: str = "QA SWE",
     methods=("static", "voting", "snowmodel"),
     majority_k=2,
     start=None,
@@ -887,7 +888,7 @@ def plot_pillow_qa_timeline(
     fig, ax = plt.subplots(figsize=(13, 5))
     ax.plot(raw.index, raw.values, label="Raw SWE", linewidth=1.8)
     if qa is not None:
-        ax.plot(qa.index, qa.values, label="QA SWE", linewidth=2.2, linestyle="--")
+        ax.plot(qa.index, qa.values, label=qa_label, linewidth=2.2, linestyle="--")
 
     # manual exclusion windows from YAML config (full-height vertical band per window).
     if manual_windows:
@@ -958,6 +959,10 @@ def plot_pillow_qa_timeline(
 def plot_all_pillows_qa_timeline(
     ds_raw: "xr.Dataset",
     df_simple: pd.DataFrame,
+    ds_qa: "xr.Dataset" = None,
+    qa_label: str = "QA SWE",
+    sharey: bool = True,
+    ymax_quantile: float = None,
     methods=("static", "voting", "snowmodel"),
     majority_k: int = 2,
     start=None,
@@ -998,6 +1003,10 @@ def plot_all_pillows_qa_timeline(
     raw_times = pd.to_datetime(ds_raw.time.values)
     tmin = raw_times.min().normalize()
     tmax = raw_times.max().normalize()
+    if ds_qa is not None:
+        qa_times = pd.to_datetime(ds_qa.time.values)
+        tmin = min(tmin, qa_times.min().normalize())
+        tmax = max(tmax, qa_times.max().normalize())
     if start is not None:
         tmin = max(tmin, pd.to_datetime(start).normalize())
     if end is not None:
@@ -1015,6 +1024,33 @@ def plot_all_pillows_qa_timeline(
         if s.notna().any():
             g_min = min(g_min, float(s.min()))
             g_max = max(g_max, float(s.max()))
+    # optional comparison series (e.g. an alternate CDEC sensor download). purely
+    # additive: with ds_qa=None every path below is byte-identical to the legacy call.
+    qa_series_by_pil = {}
+    if ds_qa is not None:
+        for pil in pillows:
+            if pil not in ds_qa.data_vars:
+                continue
+            s_qa = ds_qa[pil].to_series()
+            s_qa.index = pd.to_datetime(s_qa.index).normalize()
+            s_qa = s_qa.reindex(idx)
+            qa_series_by_pil[pil] = s_qa
+            if s_qa.notna().any():
+                g_min = min(g_min, float(s_qa.min()))
+                g_max = max(g_max, float(s_qa.max()))
+
+    # optional outlier-robust upper bound. a single bad spike (one pillow reading
+    # ~13,000 mm) otherwise sets the shared axis and flattens every panel. default
+    # None keeps the legacy true-max behaviour.
+    if ymax_quantile is not None:
+        pool = np.concatenate([
+            sr.values[np.isfinite(sr.values)]
+            for sr in list(raw_series_by_pil.values()) + list(qa_series_by_pil.values())
+            if np.isfinite(sr.values).any()
+        ]) if raw_series_by_pil or qa_series_by_pil else np.array([])
+        if pool.size:
+            g_max = float(np.quantile(pool, ymax_quantile))
+
     if not np.isfinite(g_min):
         g_min, g_max = 0.0, 1.0
     yr = max(g_max - g_min, 1.0)
@@ -1028,7 +1064,7 @@ def plot_all_pillows_qa_timeline(
     fig, axes = plt.subplots(
         nrows=nrows, ncols=ncols,
         figsize=(3.6 * ncols, 2.4 * nrows),
-        sharex=True, sharey=True,
+        sharex=True, sharey=sharey,
         squeeze=False,
     )
 
@@ -1040,6 +1076,12 @@ def plot_all_pillows_qa_timeline(
 
         # raw line
         ax.plot(raw.index, raw.values, color="C0", linewidth=1.3, label="_nolegend_")
+
+        # optional comparison line
+        if pil in qa_series_by_pil:
+            q = qa_series_by_pil[pil]
+            ax.plot(q.index, q.values, color="C5", linewidth=1.1,
+                    linestyle="--", label="_nolegend_")
 
         # manual removal windows (full-height vertical bands)
         for ws, we in manual_windows_per_pillow.get(pil, []) or []:
@@ -1092,12 +1134,23 @@ def plot_all_pillows_qa_timeline(
     for j in range(npils, nrows * ncols):
         axes.flat[j].set_visible(False)
 
+    if ymax_quantile is not None:
+        # autoscale would otherwise re-expand to the true max and undo the clamp.
+        for ax_ in axes.flat:
+            ax_.set_ylim(g_min - 0.02 * yr, g_max + 0.05 * yr)
+
     fig.supxlabel("Date", fontweight="bold")
     fig.supylabel("SWE (mm)", fontweight="bold", x=0.005)
 
     # shared legend to the right of all subplots
     legend_elements = [
         Line2D([0], [0], color="C0", lw=1.5, label="Raw SWE"),
+    ]
+    if ds_qa is not None:
+        legend_elements.append(
+            Line2D([0], [0], color="C5", lw=1.5, ls="--", label=qa_label)
+        )
+    legend_elements += [
         Patch(facecolor=method_colors["static"], alpha=0.30, label="static flag"),
         Patch(facecolor=method_colors["voting"], alpha=0.30, label="voting flag"),
         Patch(facecolor=method_colors["snowmodel"], alpha=0.30, label="snowmodel flag"),
