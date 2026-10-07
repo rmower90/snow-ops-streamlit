@@ -109,9 +109,12 @@ def uaswe_ld_rpjt_clp(
     Output:
     """
     # constants
-    scratch_dir = '/home/rossamower/work/aso/data/snodas/CONUS/nc_conus_files/wy_2026/'
-    clip_dir = f'/home/rossamower/work/aso/data/snodas/{aso_site_name}/wy_2026/'
-    if not os.path.exists(clip_dir): os.makedirs(clip_dir)
+    # The water year is resolved per date in the loop below, not pinned here. A hardcoded
+    # wy_2026 meant that once snodas_conus_download.py filed a day under its correct water
+    # year, this lookup missed it: the clip silently wrote nothing and the unconditional
+    # read a few lines further down then raised FileNotFoundError and killed the run.
+    scratch_base = '/home/rossamower/work/aso/data/snodas/CONUS/nc_conus_files/'
+    clip_base = f'/home/rossamower/work/aso/data/snodas/{aso_site_name}/'
     
     # load tables.
     if not os.path.exists(f'/home/rossamower/work/aso/data/snodas/{aso_site_name}/mean_swe_snodas_m_wy2026.csv'):
@@ -129,6 +132,11 @@ def uaswe_ld_rpjt_clp(
     print('Processing SNODAS Data:')
     for date in date_lst:
         print(date)
+        # water year of this date, so the source file is found wherever it correctly lives.
+        _wy = str(int(date[0:4]) + 1) if int(date[4:6]) >= 10 else date[0:4]
+        scratch_dir = f'{scratch_base}wy_{_wy}/'
+        clip_dir = f'{clip_base}wy_{_wy}/'
+        if not os.path.exists(clip_dir): os.makedirs(clip_dir)
         if not os.path.exists(f'{clip_dir}SNODAS_{date[0:4]}{date[4:6]}{date[6:8]}.nc'):
         #   try:
             for file in os.listdir(scratch_dir):

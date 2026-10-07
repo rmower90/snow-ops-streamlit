@@ -110,18 +110,20 @@ def uaswe_ld_rpjt_clp(
     Output:
     """
     # constants
+    # The water year is resolved per date in the loop below, not pinned here. A hardcoded
+    # wy_2026 meant that once uaswe_conus_download.py filed a day under its correct water
+    # year this lookup missed it, so the clip reported processing those dates and silently
+    # produced nothing -- the WY2026 series simply stopped six weeks short.
     if stability_level is None:
-        scratch_dir = '/home/rossamower/work/aso/data/uaswe/CONUS/wy_2026/'
-        clip_dir = f'/home/rossamower/work/aso/data/uaswe/{aso_site_name}/wy_2026/'
+        scratch_base = '/home/rossamower/work/aso/data/uaswe/CONUS/'
+        clip_base = f'/home/rossamower/work/aso/data/uaswe/{aso_site_name}/'
         mean_swe_fpath_m = f'/home/rossamower/work/aso/data/uaswe/{aso_site_name}/mean_swe_uaswe_m_wy2026.csv'
         mean_swe_fpath_acreFt = f'/home/rossamower/work/aso/data/uaswe/{aso_site_name}/mean_swe_uaswe_acreFt_wy2026.csv'
     else:
-        scratch_dir = f'/home/rossamower/work/aso/data/uaswe/CONUS/{stability_level}/wy_2026/'
-        clip_dir = f'/home/rossamower/work/aso/data/uaswe/{aso_site_name}/{stability_level}/wy_2026/'
+        scratch_base = f'/home/rossamower/work/aso/data/uaswe/CONUS/{stability_level}/'
+        clip_base = f'/home/rossamower/work/aso/data/uaswe/{aso_site_name}/{stability_level}/'
         mean_swe_fpath_m = f'/home/rossamower/work/aso/data/uaswe/{aso_site_name}/mean_swe_uaswe_m_{stability_level}_wy2026.csv'
         mean_swe_fpath_acreFt = f'/home/rossamower/work/aso/data/uaswe/{aso_site_name}/mean_swe_uaswe_acreFt_{stability_level}_wy2026.csv'
-    if not os.path.exists(clip_dir): os.makedirs(clip_dir)
-    
     # load tables.
     if not os.path.exists(mean_swe_fpath_m):
         mean_swe_df_m = None
@@ -137,6 +139,11 @@ def uaswe_ld_rpjt_clp(
     vals = []
     print('Processing UASWE Data:')
     for date in date_lst:
+        # water year of this date, so the source file is found wherever it correctly lives.
+        _wy = str(int(date[0:4]) + 1) if int(date[4:6]) >= 10 else date[0:4]
+        scratch_dir = f'{scratch_base}wy_{_wy}/'
+        clip_dir = f'{clip_base}wy_{_wy}/'
+        if not os.path.exists(clip_dir): os.makedirs(clip_dir)
         print(date)
         if not os.path.exists(f'{clip_dir}uaswe_800m_{date[0:4]}{date[4:6]}{date[6:8]}.nc'):
         #   try:
