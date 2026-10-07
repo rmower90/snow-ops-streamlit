@@ -86,29 +86,36 @@ def download_uaswe_daily(
                   end, 
                   np.timedelta64(1, 'D'))
     
-    if int(month) >= 10:
-       water_year = str(int(year) + 1)
-    else:
-       water_year = year
-    
-    # create water year directory.
-    wy_dir = f'{output_dir}wy_{water_year}/'
-    if not os.path.exists(output_dir): os.makedirs(output_dir)
-    if not os.path.exists(wy_dir): os.makedirs(wy_dir)
-
-
-    # obtain a list of files that have not been downloaded.
+    # The water year must come from each DATE, not from the run date. Deriving it once
+    # from argv files every downloaded day under the water year the *run* falls in, so a
+    # backfill executed on or after Oct 1 wrote WY-N days into wy_(N+1) -- where
+    # uaswe_basin_process.py (which reads wy_2026) never found them. On 2026-10-06 that put
+    # 43 early and 38 provisional days in the wrong directory and the basin clip silently
+    # produced nothing new, leaving the WY2026 series six weeks short.
     date_lst = [str(i)[0:10].replace('-','') for i in dates]
     print(date_lst)
-    date_lst_todwnld = []
+
+    dates_by_wy = {}
     for date in date_lst:
-        if f'uaswe_800m_{date}.nc' in os.listdir(wy_dir):
-            pass 
-        else:
-            date_lst_todwnld.append(date)
-    # download files.      
-    if len(date_lst_todwnld) > 0:
-      date_stability = uaswe_download(date_lst_todwnld,wy_dir,stability_level)
+        wy = str(int(date[0:4]) + 1) if int(date[4:6]) >= 10 else date[0:4]
+        dates_by_wy.setdefault(wy, []).append(date)
+
+    if not os.path.exists(output_dir): os.makedirs(output_dir)
+
+    # one download call per water year so a batch spanning Oct 1 still lands correctly.
+    for water_year in sorted(dates_by_wy):
+        wy_dir = f'{output_dir}wy_{water_year}/'
+        if not os.path.exists(wy_dir): os.makedirs(wy_dir)
+
+        date_lst_todwnld = []
+        for date in dates_by_wy[water_year]:
+            if f'uaswe_800m_{date}.nc' in os.listdir(wy_dir):
+                pass
+            else:
+                date_lst_todwnld.append(date)
+        # download files.
+        if len(date_lst_todwnld) > 0:
+          date_stability = uaswe_download(date_lst_todwnld,wy_dir,stability_level)
     return
 
 
@@ -201,11 +208,20 @@ def pad_zero(val):
       return str_val
    
 def check_mismatching_dates(df,conus_dir):
+    # conus_dir may be the CONUS base (holding wy_* subdirectories) or a single wy_
+    # directory. Scanning one water year only would report every date outside it as
+    # missing, truncating the checklist and re-downloading those days on every run.
+    scan_dirs = sorted(
+        os.path.join(conus_dir, d) for d in os.listdir(conus_dir)
+        if d.startswith('wy_') and os.path.isdir(os.path.join(conus_dir, d))
+    ) or [conus_dir]
+
     date_lst = []
-    for file in os.listdir(conus_dir):
-        if file.endswith('.nc'):
-            date = file.split('_')[5]
-            date_lst.append(f'{date[0:4]}-{date[4:6]}-{date[6:8]}')
+    for d in scan_dirs:
+        for file in os.listdir(d):
+            if file.endswith('.nc'):
+                date = file.split('_')[5]
+                date_lst.append(f'{date[0:4]}-{date[4:6]}-{date[6:8]}')
     
     df_dir = pd.DataFrame(data = sorted(date_lst),
                       columns = ['download_date'])
@@ -291,10 +307,10 @@ if __name__ =="__main__":
         if stability not in ['early','provisional','stable']:
             stability = None
             base_dir = '/home/rossamower/work/aso/data/uaswe/CONUS/'
-            file_dir = '/home/rossamower/work/aso/data/uaswe/CONUS/wy_2026/'
+            file_dir = '/home/rossamower/work/aso/data/uaswe/CONUS/'
         else:
             base_dir = f'/home/rossamower/work/aso/data/uaswe/CONUS/{stability}/'
-            file_dir = f'/home/rossamower/work/aso/data/uaswe/CONUS/{stability}/wy_2026/'
+            file_dir = f'/home/rossamower/work/aso/data/uaswe/CONUS/{stability}/'
         # download_uaswe_wateryear(water_year,out_dir,stability)
         # generate_uaswe_download_todolist(year,month,day,'/home/rossamower/work/aso/data/uaswe/CONUS/wy_2026/')
         generate_uaswe_download_todolist(year,month,day,file_dir,stability)
