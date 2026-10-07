@@ -95,7 +95,7 @@ the majority persists ≥3 consecutive days** (`persistence_days=3`).
 
 **Outputs:** `processed/*_insitu_obs_daily_wy_YYYY.nc` (the masked dataset MLR consumes),
 `qa/insitu_qa_{simple,detail}_wy_YYYY.csv`, and per-pillow diagnostic PNGs under
-`qa/qa_viz_YYYY/` and `qa/qa_method_diagnostics_YYYY/`.
+`qa/qa_viz_YYYY/` and `qa/qa_method_diagnostics_YYYY/`. An example of pillow QA results for all pillows in the San Joaquin for WY2026 is provided in `../pngs/all_pils_qa_USCASJ_wy2026.png`.
 
 Setting `manual_qa_only: True` applies only the manual mask to the saved dataset; the
 automated methods still run so the diagnostics remain comparable.

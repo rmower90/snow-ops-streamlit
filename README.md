@@ -59,6 +59,7 @@ Restarting is a water-year rollover, not simply re-enabling cron — see
 | `config/regions/` | Per-basin configuration: geometry, elevation bands, pillow lists, QA exclusions |
 | `docs/` | Decision records and operational plans |
 | `data/basins/` | Published per-basin outputs consumed by the web app |
+| `pngs/` | Additional figures |
 | `public/` | Generated HTML and figures |
 | `app.py`, `pages/` | Streamlit application |
 | `notebooks/` | Exploratory analysis |
