@@ -1,7 +1,7 @@
 # Snow-Ops
 
-Operational basin snow-water-equivalent (SWE) prediction for Bureau of Reclamation water
-supply forecasting, built around Airborne Snow Observatories (ASO) lidar flights.
+Operational basin snow-water-equivalent (SWE) prediction for water
+supply forecasting, built around Airborne Snow Observatories (ASO) lidar flights and snow pillows.
 
 ---
 
