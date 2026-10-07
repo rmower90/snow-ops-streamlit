@@ -68,6 +68,31 @@ sbatch --export=ALL run_prediction.sh USCASJ 2026 0 0 0 0   # season, snowmodel 
 
 ---
 
+## What the suffix isolates
+
+`MLR_STACK_SUFFIX` must cover every artifact a run writes *or reads back*, not just the
+predictions. It currently keys:
+
+| Artifact | Path |
+|---|---|
+| Predictions, ensemble, manifest | `{mlrPred_dir}/{stack}{SUFFIX}/{model}/` |
+| **Imputation cache** | `{mlrPred_dir}/imputation{SUFFIX}/` |
+
+The imputation cache is the non-obvious one. Tables are named
+`pillow_impute_*_wy{YYYY}.csv` — keyed by water year and nothing else — and the read-back is
+unconditional: once the file exists it is never rebuilt, however the inputs changed. A
+shared directory therefore cannot corrupt an earlier run's table, but it will silently feed
+a *new* run the *old* one.
+
+That is precisely how FRIANT v2–v6 ended up with their "predict NaNs" half imputed from qa1
+while the "drop NaNs" half tracked the newer data. The historic runner was fixed by keying
+the cache to the QA rung; the daily runner carried the same defect until this experiment
+surfaced it.
+
+**If you add another artifact that is cached and read back, key it by the suffix too.**
+
+---
+
 ## Environment knobs
 
 | Variable | Script | Default |

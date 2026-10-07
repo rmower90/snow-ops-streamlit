@@ -316,7 +316,18 @@ if __name__ =="__main__":
 
     historic_vals_df = preprocessing.create_qa_tables(obs_data_train_lst, [], isQA=False)
 
-    impute_dir = f'{mlrPred_dir}imputation/'
+    # The imputation tables are cached as pillow_impute_*_wy{YYYY}.csv -- keyed by water
+    # year in the filename and nothing else -- and the read-back is unconditional: once the
+    # file exists it is never recomputed, however the inputs changed. Sharing one directory
+    # across runs therefore does not corrupt a previous run's table (it is only written when
+    # absent) but silently feeds a NEW run the OLD table. That is how the FRIANT v2-v6
+    # "predict NaNs" half ended up imputed from qa1 while the "drop NaNs" half tracked the
+    # new data -- see the OBS_QA_FILE comment in mlr_prediction_historic.py, where the fix
+    # was to key the cache by QA rung.
+    #
+    # Key it by the same suffix that isolates the prediction outputs, so an experiment gets
+    # its own tables rebuilt from its own inputs. Unset suffix -> 'imputation/', unchanged.
+    impute_dir = f'{mlrPred_dir}imputation{os.environ.get("MLR_STACK_SUFFIX", "")}/'
     
     obs_data_impute,pils_removed,impute_na_df = preprocessing.imputation_w_pillows(df_sum_total,
                                                                                    all_pils,
