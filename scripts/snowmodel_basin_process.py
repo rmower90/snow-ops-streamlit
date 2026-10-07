@@ -489,6 +489,7 @@ if __name__ =="__main__":
     month_str = sys.argv[3]
     day_str = sys.argv[4]
     # one less day for snowmodel output.
+    day_str = str(int(day_str) -1)
 
     elev_bin_labels, shape_fpath, demBin_fpath, aso_spatial_fpath, aso_tseries_fpath, snowmodel_dir, snodas_dir, insitu_dir, shape_crs = load_aso_metadata(aso_site_name)
 

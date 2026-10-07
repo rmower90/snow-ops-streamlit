@@ -1254,7 +1254,8 @@ def impute_pillow_prediction(df_sum_total,
                              prediction_date,
                              obs_threshold = 0.50,
                              saveImputeCSV = True,
-                             cache_suffix = ''):
+                             cache_suffix = '',
+                             impute_fpath = None):
     """
         Fit a linear regression model
         Input:
@@ -1276,13 +1277,29 @@ def impute_pillow_prediction(df_sum_total,
     ## subset summary table to remove pillows with minimal observations.
     df_dropped_pils = df_sum_total[pils_removed]
     ## create output fpath name.
-    if not os.path.exists(f'/home/rossamower/work/aso/data/mlr_prediction/{aso_site_name}/imputation/'):
-        os.makedirs(f'/home/rossamower/work/aso/data/mlr_prediction/{aso_site_name}/imputation/')
-        
-    if prediction_date.month >= 10:
-        impute_df_fpath = f'/home/rossamower/work/aso/data/mlr_prediction/{aso_site_name}/imputation/pillow_impute_threePils_wy{prediction_date.year+1}{cache_suffix}.csv'
+    # impute_fpath lets a caller own the table's location outright. Default None keeps the
+    # production path expression below byte-identical, so every existing call site -- both
+    # drivers and the A/B harness -- is unaffected.
+    #
+    # The reason it exists: the derived path is keyed on prediction_date's water year and
+    # lives in the day-to-day imputation cache namespace. A pretrained model library needs
+    # ONE table built from the whole historical record with no prediction date at all, and
+    # it must not be able to collide with, overwrite, or be satisfied by a per-WY
+    # operational cache entry. Encoding a fake water year to dodge that collision would put
+    # a non-water-year file in the production namespace; this keeps the two separate.
+    if impute_fpath is not None:
+        impute_df_fpath = str(impute_fpath)
+        _impute_parent = os.path.dirname(impute_df_fpath)
+        if _impute_parent:
+            os.makedirs(_impute_parent, exist_ok = True)
     else:
-        impute_df_fpath = f'/home/rossamower/work/aso/data/mlr_prediction/{aso_site_name}/imputation/pillow_impute_threePils_wy{prediction_date.year}{cache_suffix}.csv'
+        if not os.path.exists(f'/home/rossamower/work/aso/data/mlr_prediction/{aso_site_name}/imputation/'):
+            os.makedirs(f'/home/rossamower/work/aso/data/mlr_prediction/{aso_site_name}/imputation/')
+
+        if prediction_date.month >= 10:
+            impute_df_fpath = f'/home/rossamower/work/aso/data/mlr_prediction/{aso_site_name}/imputation/pillow_impute_threePils_wy{prediction_date.year+1}{cache_suffix}.csv'
+        else:
+            impute_df_fpath = f'/home/rossamower/work/aso/data/mlr_prediction/{aso_site_name}/imputation/pillow_impute_threePils_wy{prediction_date.year}{cache_suffix}.csv'
     ## if table does not exist.
     need_build = (not os.path.exists(impute_df_fpath)) or (saveImputeCSV == False)
 
