@@ -261,14 +261,25 @@ if __name__ =="__main__":
     sm_train_ds = xr.open_zarr(f'{insitu_dir}hrrr_correlated_train_2017_2025_dowy.zarr', consolidated=False)
     sm_test_ds = xr.open_zarr(f'{insitu_dir}hrrr_correlated_test_2026.zarr', consolidated=False)
 
+    # Experiment knobs for the test year's observations. Both default to the operational
+    # paths, so a plain cron invocation is unchanged. Training data is deliberately NOT
+    # parameterised here: the ASO-date comparison in
+    # docs/training_data_sensor82_aso_comparison.md found the two candidate training
+    # records differ on 6 of 736 cells, so the fit does not move and swapping it would only
+    # change imputation-donor availability.
+    test_raw_rel = os.environ.get('MLR_TEST_OBS_RAW_FILE') or f'raw/{aso_site_name}_insitu_obs_daily_wy_2026.nc'
+    test_qa_rel  = os.environ.get('MLR_TEST_OBS_FILE')     or f'processed/{aso_site_name}_insitu_obs_daily_wy_2026.nc'
+    if 'MLR_TEST_OBS_RAW_FILE' in os.environ or 'MLR_TEST_OBS_FILE' in os.environ:
+        print(f'EXPERIMENT MODE: test raw={test_raw_rel}  test qa={test_qa_rel}')
+
     # testing raw.
-    obs_data_test_ds_raw = xr.load_dataset(f'{insitu_dir}raw/{aso_site_name}_insitu_obs_daily_wy_2026.nc')
+    obs_data_test_ds_raw = xr.load_dataset(f'{insitu_dir}{test_raw_rel}')
     # match times.
     obs_data_test_ds_raw = obs_data_test_ds_raw.sel(time = sm_test_ds.time)
     obs_data_test_lst_raw = dataset_to_list(obs_data_test_ds_raw)
 
     # testing qa.
-    obs_data_test_ds = xr.load_dataset(f'{insitu_dir}processed/{aso_site_name}_insitu_obs_daily_wy_2026.nc')
+    obs_data_test_ds = xr.load_dataset(f'{insitu_dir}{test_qa_rel}')
     # match times.
     obs_data_test_ds = obs_data_test_ds.sel(time = sm_test_ds.time)
     obs_data_test_lst = dataset_to_list(obs_data_test_ds)
@@ -450,6 +461,66 @@ if __name__ =="__main__":
     pillows_path = f'{mlrPred_dir}/{aso_stack_type}/{seasonal_dir}/pillows/'
     if not os.path.exists(pillows_path): os.makedirs(pillows_path)
     
+
+    # Provenance: record exactly which inputs produced these numbers. Cheap insurance --
+    # the sensor-policy decision was once recoverable only from an email thread.
+    try:
+        import hashlib, json, subprocess, datetime
+        def _sha16(p):
+            # Files hash directly; zarr stores are directories, so hash every chunk in a
+            # stable order. Both correlated-grid stores are ~1 MB / <30 files, so a full
+            # content hash is cheap and actually detects a value change -- a path-and-size
+            # digest would not.
+            try:
+                h = hashlib.sha256()
+                if os.path.isdir(p):
+                    for root, dirs, files in os.walk(p):
+                        dirs.sort()
+                        for name in sorted(files):
+                            fp = os.path.join(root, name)
+                            h.update(os.path.relpath(fp, p).encode())
+                            with open(fp,'rb') as fh:
+                                for blk in iter(lambda: fh.read(1 << 20), b''): h.update(blk)
+                else:
+                    with open(p,'rb') as fh:
+                        for blk in iter(lambda: fh.read(1 << 20), b''): h.update(blk)
+                return h.hexdigest()[:16]
+            except Exception:
+                return None
+        def _git(*a):
+            try:
+                return subprocess.check_output(['git',*a], cwd=os.path.dirname(os.path.abspath(__file__)),
+                                               stderr=subprocess.DEVNULL, text=True).strip()
+            except Exception:
+                return None
+        _train = f'{insitu_dir}processed/pillow_wy_1980_2025_qa1.nc'
+        _inputs = {
+            'train_pillows':  _train,
+            'test_pillows_qa':  f'{insitu_dir}{test_qa_rel}',
+            'test_pillows_raw': f'{insitu_dir}{test_raw_rel}',
+            'sm_train_zarr':  f'{insitu_dir}hrrr_correlated_train_2017_2025_dowy.zarr',
+            'sm_test_zarr':   f'{insitu_dir}hrrr_correlated_test_2026.zarr',
+            'aso_temporal':   aso_tseries_fpath,
+        }
+        manifest = {
+            'written_utc': datetime.datetime.utcnow().isoformat(timespec='seconds') + 'Z',
+            'basin': aso_site_name, 'water_year': water_year,
+            'model': {'selection': 'identify_best_stations: combinations of 1-5, argmax adj_r2',
+                      'seasonal_dir': seasonal_dir, 'isSplit': bool(isSplit), 'isAccum': bool(isAccum),
+                      'imputation': 'pillow' if pillowImputation_ else 'snowmodel',
+                      'aso_stack_type': aso_stack_type, 'n_ensemble': N_ENSEMBLE},
+            'inputs': {k: {'path': v, 'sha256_16': _sha16(v)} for k, v in _inputs.items()},
+            'env_overrides': {k: os.environ[k] for k in
+                              ('MLR_TEST_OBS_FILE','MLR_TEST_OBS_RAW_FILE','MLR_STACK_SUFFIX','MLR_N_ENSEMBLE')
+                              if k in os.environ},
+            'git': {'commit': _git('rev-parse','HEAD'), 'branch': _git('rev-parse','--abbrev-ref','HEAD'),
+                    'dirty': bool(_git('status','--porcelain'))},
+        }
+        with open(f'{dir_path}run_manifest.json','w') as fh:
+            json.dump(manifest, fh, indent=2)
+        print(f'WROTE {dir_path}run_manifest.json')
+    except Exception as e:
+        print(f'WARNING: run manifest not written ({e!r}) -- predictions are unaffected')
 
     prediction_mm_df.to_csv(f'{mm_path}prediction_mm_wy{water_year}_combination.csv',index = False)
     prediction_acreFt_df.to_csv(f'{acre_path}prediction_acreFt_wy{water_year}_combination.csv',index = False)

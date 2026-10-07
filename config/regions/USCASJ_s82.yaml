@@ -1,0 +1,70 @@
+name: San Joaquin
+abreviation: USCASJ
+crs:
+  epsg: 32611
+elevation:
+  unit: ft        # source unit for edges
+  bins:
+    labels: ["<7k", "7k-8k", "8k-9k", "9k-10k", "10k-11k", "11k-12k", ">12k"]
+    edges:        # same length = len(labels)+1; -inf/+inf allowed
+      - -inf
+      - 7000
+      - 8000
+      - 9000
+      - 10000
+      - 11000
+      - 12000
+      - +inf
+aso_years:
+  start: 2017
+  end: 2025
+conus404_indexing:
+  idy_min: 504
+  idy_max: 526
+  idx_min: 209
+  idx_max: 239
+hrrr_indexing:
+  idy_min: 287
+  idy_max: 321
+  idx_min: 198
+  idx_max: 240
+hrrr_insitu_buff_indexing:
+  idy_min: 273
+  idy_max: 350
+  idx_min: 193
+  idx_max: 245
+data_filepaths:
+  aso_spatial: /home/rossamower/work/aso/data/aso/USCASJ/ASO_50M_SWE_SPATIAL.nc
+  aso_temporal: /home/rossamower/work/aso/data/aso/USCASJ/ASO_50M_SWE_TSERIES.nc
+  aso_demBin: /home/rossamower/work/aso/data/dem/USCASJ/ASO_50M_PCDTM_USCASJ_bins_1000ft.nc 
+  aso_shape: /home/rossamower/work/aso/data/shape/USCASJ/dem_shape_geog.shp
+  uaswe_dir: /home/rossamower/work/aso/data/uaswe/USCASJ/
+  snowmodel_dir: /home/rossamower/work/aso/snowmodel/domains/USCASJ/
+  snodas_dir: /home/rossamower/work/aso/data/snodas/USCASJ/
+  insitu_dir: /home/rossamower/work/aso/data/insitu/USCASJ/
+  mlrPred_dir: /home/rossamower/work/aso/data/mlr_prediction/USCASJ/models/
+pillow_api:
+  manual_qa_only: False
+  pil_names: AGP,BCB,BGP,BSH,CHM,DAN,DPO,FLV,GEM,GRM,GRV,HNT,KSP,KUB,KUP,LLE,MAM,MHP,PSR,SLK,SNF,STL,STR,SWM,TMR,TNY,TUM,UBC,VLC,WWC
+  snotel_rename:
+    name: LEAVITT LAKE
+    network: snotel
+    id: LLE
+  exclude_pillows: []
+  exclude_pillows_ranges:
+    # Sensor-82 WY2026 variant. The 19 windows carried by USCASJ.yaml were drawn by eye
+    # against the blended (82,3) series; visual review of the 82-only download found it
+    # clean apart from one artifact, so they are deliberately NOT carried over.
+    #
+    # KUP reads 13,107.2 mm on 2026-06-20 and 06-21 -- roughly 12x the largest legitimate
+    # value anywhere in the basin -- sitting between unbroken runs of 0.0. Present in the
+    # blended download too, so it is bad sensor-82 data rather than a sensor-policy
+    # artifact. All three automated QA methods flag it; it survives only because
+    # build_majority_qa_ds requires a 3-day persistence and this lasts 2.
+    #
+    # Window is deliberately narrow. Every value from 2026-05-15 to year end is a genuine
+    # 0.0 (137 days, verified), and a melted-out pillow reading zero is real information --
+    # NaN-ing it would invite imputation to fill it with something non-zero.
+    - pillow: KUP
+      start: 2026-06-19
+      end: 2026-06-22

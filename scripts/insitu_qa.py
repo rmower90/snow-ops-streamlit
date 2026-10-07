@@ -387,7 +387,26 @@ if __name__ =="__main__":
     day_str = str(int(day_str) -1)
 
     # load metadata information.
-    elev_bin_labels, shape_fpath, demBin_fpath, aso_spatial_fpath, aso_tseries_fpath, snowmodel_dir, snodas_dir, insitu_dir, shape_crs, cfg = load_aso_metadata(aso_site_name)
+    # ------------------------------------------------------------------
+    # Experiment knobs. All default to the historic behaviour, so a plain cron
+    # invocation is byte-for-byte unchanged.
+    #
+    #   INSITU_QA_CONFIG_NAME  region yaml to read, if not the basin's own. Lets an
+    #                          experiment carry different exclude_pillows_ranges without
+    #                          touching the operational config or renaming the basin.
+    #   INSITU_QA_RAW_FILE     input observations, relative to insitu_dir.
+    #   INSITU_QA_SUFFIX       appended to EVERY output artifact. Without it an
+    #                          experimental run overwrites processed/<basin>_insitu_obs...
+    #                          -- which is both what mlr_prediction.py reads and the input
+    #                          the published baseline was produced from.
+    # ------------------------------------------------------------------
+    qa_config_name = os.environ.get('INSITU_QA_CONFIG_NAME') or aso_site_name
+    qa_suffix      = os.environ.get('INSITU_QA_SUFFIX', '')
+    qa_raw_rel     = os.environ.get('INSITU_QA_RAW_FILE') or f'raw/{aso_site_name}_insitu_obs_daily_wy_2026.nc'
+    if qa_config_name != aso_site_name or qa_suffix or 'INSITU_QA_RAW_FILE' in os.environ:
+        print(f'EXPERIMENT MODE: config={qa_config_name}  raw={qa_raw_rel}  suffix="{qa_suffix}"')
+
+    elev_bin_labels, shape_fpath, demBin_fpath, aso_spatial_fpath, aso_tseries_fpath, snowmodel_dir, snodas_dir, insitu_dir, shape_crs, cfg = load_aso_metadata(qa_config_name)
 
     # pillows to exclude from QA.
     exclude_pillows = cfg['pillow_api'].get('exclude_pillows') or []
@@ -411,7 +430,7 @@ if __name__ =="__main__":
     sm_test_ds = xr.open_zarr(f'{insitu_dir}hrrr_correlated_test_2026.zarr', consolidated=False)
 
     # testing.
-    obs_data_test_ds = xr.load_dataset(f'{insitu_dir}raw/{aso_site_name}_insitu_obs_daily_wy_2026.nc')
+    obs_data_test_ds = xr.load_dataset(f'{insitu_dir}{qa_raw_rel}')
     # match times.
     obs_data_test_ds = obs_data_test_ds.sel(time = sm_test_ds.time)
 
@@ -482,7 +501,7 @@ if __name__ =="__main__":
         end=None,
         manual_windows_per_pillow=manual_windows_per_pillow,
         saveFIG=True,
-        figDIR=f'{insitu_dir}qa/qa_viz_2026/',
+        figDIR=f'{insitu_dir}qa/qa_viz_2026{qa_suffix}/',
         figFNAME='all_pils.png',
         dpi=300,
     )
@@ -498,7 +517,7 @@ if __name__ =="__main__":
         end=None,
         manual_windows=manual_windows_per_pillow.get(pil, []),
         saveFIG = True,
-        figDIR = f'{insitu_dir}qa/qa_viz_2026/'
+        figDIR = f'{insitu_dir}qa/qa_viz_2026{qa_suffix}/'
     )
     for pil in obs_data_test_ds_unmasked.data_vars:
     # static
@@ -515,7 +534,7 @@ if __name__ =="__main__":
         majority_df_simple=df_simple,   # optional
         manual_windows=manual_windows_per_pillow.get(pil, []),
         saveFIG = True,
-        figDIR = f'{insitu_dir}qa/qa_method_diagnostics_2026/'
+        figDIR = f'{insitu_dir}qa/qa_method_diagnostics_2026{qa_suffix}/'
         )
 
         # voting
@@ -530,7 +549,7 @@ if __name__ =="__main__":
         majority_df_simple=df_simple,
         manual_windows=manual_windows_per_pillow.get(pil, []),
         saveFIG = True,
-        figDIR = f'{insitu_dir}qa/qa_method_diagnostics_2026/'
+        figDIR = f'{insitu_dir}qa/qa_method_diagnostics_2026{qa_suffix}/'
         )
 
         # snowmodel (+ show best/second/third from test_ds)
@@ -546,11 +565,11 @@ if __name__ =="__main__":
         majority_df_simple=df_simple,
         manual_windows=manual_windows_per_pillow.get(pil, []),
         saveFIG = True,
-        figDIR = f'{insitu_dir}qa/qa_method_diagnostics_2026/'
+        figDIR = f'{insitu_dir}qa/qa_method_diagnostics_2026{qa_suffix}/'
         )
 
-    df_simple.to_csv(f'{insitu_dir}qa/insitu_qa_simple_wy_2026.csv',index = False)
-    df_detail.to_csv(f'{insitu_dir}qa/insitu_qa_detail_wy_2026.csv',index = False)
+    df_simple.to_csv(f'{insitu_dir}qa/insitu_qa_simple_wy_2026{qa_suffix}.csv',index = False)
+    df_detail.to_csv(f'{insitu_dir}qa/insitu_qa_detail_wy_2026{qa_suffix}.csv',index = False)
 
     # build the output NetCDF.
     if manual_qa_only:
@@ -571,7 +590,9 @@ if __name__ =="__main__":
         )
 
     # Example save
-    ds_majority.to_netcdf(f'{insitu_dir}processed/{aso_site_name}_insitu_obs_daily_wy_2026.nc')
+    out_nc = f'{insitu_dir}processed/{aso_site_name}_insitu_obs_daily_wy_2026{qa_suffix}.nc'
+    ds_majority.to_netcdf(out_nc)
+    print(f'WROTE {out_nc}')
 
     print('INSITU QA COMPLETE.')
 
