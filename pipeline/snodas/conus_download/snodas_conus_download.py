@@ -460,9 +460,19 @@ def download_snodas_daily_data(year: str,
         if not os.path.exists(f'{nc_dir}SNODAS_{date_no_hyphen[download_date]}.nc'):
             # try:
             tar_name = f'SNODAS_{date_no_hyphen[download_date]}.tar'
-            # download snodas in directory.
-            if not os.path.exists(download_directory):
+            tar_path = os.path.join(download_directory, tar_name)
+            # Guard on the tar, not the directory. `wget -P` creates the directory only on
+            # success, so a leftover directory from a failed attempt used to suppress the
+            # retry -- and the extract below then failed on a tar that was never fetched.
+            if not os.path.exists(tar_path):
               runcmd(f"wget -P {download_directory} https://noaadata.apps.nsidc.org/NOAA/G02158/masked/{date_no_hyphen[download_date][0:4]}/{month_dict[date_no_hyphen[download_date][4:6]]}/{tar_name}", verbose = False)
+            # A failed fetch used to be fatal: os.chdir() on the missing directory raised
+            # and killed the run, so one bad day cost every day after it. On 2026-08-30 a
+            # transient failure abandoned the remaining 37 days of a backfill (the file was
+            # available upstream the whole time). Skip the date and keep going instead.
+            if not os.path.exists(tar_path):
+              print(f'  WARNING: download failed for {date_no_hyphen[download_date]}; skipping this date')
+              continue
             # change directory
             os.chdir(download_directory)
             # unpack files.
