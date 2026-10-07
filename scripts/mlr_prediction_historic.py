@@ -33,6 +33,45 @@ import postprocessing as postprocessing
 # -------------------------------------------------------------------------
 ASO_HOLDOUT_MODE = 'wy'
 
+# -------------------------------------------------------------------------
+# Which QA rung of the pillow ladder to train/test on.
+#
+# The imputation table is cached on disk keyed by (site, water year, suffix) ONLY, and the
+# read-back is unconditional -- once the file exists it is never recomputed, regardless of
+# whether the inputs changed. The tables under FRIANT/imputation/ were all written during
+# the v1 run (2026-03-07) from qa1 data, so v2-v6 reused them three months later even
+# though the qa ladder had changed the pillow record underneath: qa2 removed 36 flight-date
+# cells inside 2017-2025, qa3 interpolated 4 more, qa5 zero-filled 2, and qa3/qa6 together
+# changed 408 values inside the >= 2013 window that impute_pillow_prediction regresses on.
+# Result: the "predict NaNs" half of v2-v6 was imputed from qa1 while the "drop NaNs" half
+# correctly tracked the new data.
+#
+# Deriving the cache tag from the filename means changing the rung automatically re-keys
+# the cache, so this cannot silently recur. One table per rung, computed once, reused after.
+# -------------------------------------------------------------------------
+OBS_QA_FILE = 'pillow_wy_1980_2025_qa6.nc'
+OBS_QA_TAG = OBS_QA_FILE.replace('.nc', '').split('_')[-1]   # -> 'qa6'
+
+# -------------------------------------------------------------------------
+# Uncertainty ensemble.
+#
+# identify_best_stations already scores every combination of the candidate pillows taken
+# 1..5 and keeps only the argmax. N_ENSEMBLE > 1 also predicts with the next-best
+# combinations, giving a spread per (day, imputation mode, elevation band) instead of a
+# single number. N_ENSEMBLE = 1 leaves the published path completely untouched.
+#
+# RANKED_TOP_K is how many ranked combinations to retain. Each one costs a training frame
+# (see _build_frame in lm_model.py), so retaining more than N_ENSEMBLE is wasted work --
+# keep them equal unless deliberately exploring deeper.
+#
+# Output goes to ensemble_tidy_wy{YYYY}.csv beside the prediction_* files. The
+# `ensemble_` prefix matters: generateHTMLPred.js matches on a `prediction_acreFt_wy`
+# prefix plus `_combination.csv`, and 3_MLR_Investigation.py globs prediction_mm_wy*.
+# A different leading token keeps the new file invisible to both.
+# -------------------------------------------------------------------------
+N_ENSEMBLE = 10
+RANKED_TOP_K = N_ENSEMBLE
+
 
 def load_aso_metadata(aso_site_name: str,
                   config_dir: str = '/home/rossamower/work/aso/configs/',
@@ -232,7 +271,7 @@ if __name__ == "__main__":
                                                                                 shape_crs)
 
     # obs data.
-    obs_data = xr.load_dataset(f'{insitu_dir}processed/pillow_wy_1980_2025_qa6.nc')
+    obs_data = xr.load_dataset(f'{insitu_dir}processed/{OBS_QA_FILE}')
     # obs test.
     obs_data_test_ds = obs_data.where(obs_data.time>=np.datetime64(f'{water_year-1}-10-01'), drop = True) \
                        .where(obs_data.time<np.datetime64(f'{water_year}-10-01'), drop = True)    
@@ -291,6 +330,19 @@ if __name__ == "__main__":
 
     impute_dir = f'{mlrPred_dir}imputation/'
     
+    # NOTE (deferred cleanup -- "option b"):
+    # All three return values here are discarded; nothing below reads them. What this call
+    # actually does is WRITE {impute_dir}/pillow_impute_threePils_wy{water_year}.csv, which
+    # lm_model.impute_pillow_prediction() then READS during training. So the writer lives in
+    # preprocessing and the reader lives in lm_model, as two near-duplicate implementations
+    # of the same triple-nested correlation search, and whichever creates the file first
+    # determines its contents.
+    #
+    # Now that the reader is keyed by OBS_QA_TAG, this writer still emits the UNSUFFIXED
+    # file on every run -- work whose output nothing consumes. Dropping the call is provably
+    # a no-op on results (returns unused), but it changes which files exist on disk, so it
+    # should be done deliberately and only after confirming the two implementations agree.
+    # Verify that first, then delete this call and de-duplicate the two functions.
     obs_data_impute,pils_removed,impute_na_df = preprocessing.imputation_w_pillows(df_sum_total,
                                                                                all_pils,
                                                                                obs_data_qa,
@@ -326,6 +378,7 @@ if __name__ == "__main__":
     # pillows are available, not on the day's actual SWE values, so we can
     # reuse training results for all days that share the same pillow set.
     training_model_cache = {}
+    ensemble_rows = []
 
     n_timesteps = obs_data_test_lst[0].time.shape[0]
     print(f'num timesteps: {n_timesteps - 1}')
@@ -395,11 +448,13 @@ if __name__ == "__main__":
         # because test-WY flights are now included) AND must differ per excluded
         # flight date (each excluded flight produces a different df_sum_total).
         # In 'wy' mode the suffix is '' so production cache filenames are unchanged.
+        # the qa tag keys the cache to the pillow rung being used, so switching rungs no
+        # longer silently reuses the previous rung's imputation table.
         if ASO_HOLDOUT_MODE == 'flight':
             ex_tag = excluded_flight.strftime('%Y%m%d') if excluded_flight is not None else 'none'
-            impute_cache_suffix_ = f'_v5_excl{ex_tag}'
+            impute_cache_suffix_ = f'_{OBS_QA_TAG}_v5_excl{ex_tag}'
         else:
-            impute_cache_suffix_ = ''
+            impute_cache_suffix_ = f'_{OBS_QA_TAG}'
         if cache_key not in training_model_cache:
             print(f'  Training models for new pillow set (n_QA={len(all_pils_QA)}, n_baseline={len(baseline_pils_)})...')
             training_model_cache[cache_key] = lm_model.train_all_mlr_models(
@@ -409,7 +464,13 @@ if __name__ == "__main__":
                 modelNUM=model_num, isMean=False, showOutput=showOutput,
                 saveValidation=False, isCombination_=isCombination,
                 pillowImputation_=pillowImputation_, ds_snowmodel_=None,
-                impute_cache_suffix=impute_cache_suffix_)
+                impute_cache_suffix=impute_cache_suffix_,
+                capture_ranked=(N_ENSEMBLE > 1), ranked_top_k=RANKED_TOP_K)
+
+        # mark where this day's ensemble rows start, so they can be annotated with the
+        # availability counts below. predict_with_cached_training cannot supply these --
+        # all_pils_QA / baseline_pils_ are computed out here in the daily loop.
+        _ens_start = len(ensemble_rows)
 
         try:
             # v4 experiment: force the regression through the origin (yhat=0 when all
@@ -419,6 +480,8 @@ if __name__ == "__main__":
                                                     current_vals_df.reset_index(names = 'time'),
                                                     current_date, elev_bin_labels,
                                                     fit_intercept=False,
+                                                    n_ensemble=N_ENSEMBLE,
+                                                    ensemble_sink=ensemble_rows,
                                                     )
 
             prediction_mm_df,prediction_acreFt_df,prediction_pillow_df = postprocessing.arrange_prediction_tables(df_sheet_lst_mm,
@@ -441,6 +504,17 @@ if __name__ == "__main__":
                                                                                                           prediction_pillow_df,
                                                                                                           )
             print(current_date,' COULD NOT PROCESS MLR!!')
+
+        # Availability counts for this day, attached to whichever ensemble rows were just
+        # produced. Recorded explicitly because inferring availability from the ensemble
+        # output is unreliable: using "distinct pillows across the top-10" as a proxy
+        # produced a spurious result -- it flagged Oct 2016 as a low-availability period
+        # with 3x the spread, when in fact SWE was ~6mm there and the percentage was just a
+        # near-zero denominator. Absolute spread was the smallest of the year.
+        for _r in ensemble_rows[_ens_start:]:
+            _r['n_QA'] = len(all_pils_QA)
+            _r['n_baseline'] = len(baseline_pils_)
+            _r['pillows_QA'] = ','.join(sorted(map(str, all_pils_QA)))
 
                                                 
     end = time.time()
@@ -472,5 +546,13 @@ if __name__ == "__main__":
     prediction_mm_df.to_csv(f'{mm_path}prediction_mm_wy{water_year}_combination.csv',index = False)
     prediction_acreFt_df.to_csv(f'{acre_path}prediction_acreFt_wy{water_year}_combination.csv',index = False)
     prediction_pillow_df.to_csv(f'{pillows_path}prediction_pillows_wy{water_year}_combination.csv',index = False)
+
+    if ensemble_rows:
+        ens_df = pd.DataFrame(ensemble_rows).sort_values(
+            ['date','isImpute','elev_band','rank']).reset_index(drop=True)
+        ens_path = f'{dir_path}ensemble_tidy_wy{water_year}.csv'
+        ens_df.to_csv(ens_path, index = False)
+        n_fail = ens_df['error'].notna().sum() if 'error' in ens_df.columns else 0
+        print(f'ENSEMBLE: {len(ens_df)} members written to {ens_path} ({n_fail} failed)')
 
     print('MLR PREDICTION COMPLETE!!!\n')

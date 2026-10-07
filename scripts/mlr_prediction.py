@@ -25,6 +25,32 @@ import preprocessing as preprocessing
 import lm_model as lm_model
 import postprocessing as postprocessing
 
+# -------------------------------------------------------------------------
+# Uncertainty ensemble, for the live daily path.
+#
+# identify_best_stations already scores every candidate pillow combination and keeps only
+# the argmax. N_ENSEMBLE > 1 also predicts with the next-best combinations, giving a spread
+# per (day, imputation mode, elevation band). N_ENSEMBLE = 1 leaves the published path
+# byte-identical -- verified against a pre-change baseline on FRIANT 1997 and 2017.
+#
+# Driven by the environment, NOT a source constant, so the A/B is
+#     MLR_N_ENSEMBLE=1  ... baseline
+#     MLR_N_ENSEMBLE=10 ... ensemble
+# rather than an edit between runs. The FRIANT v1-v6 history is the argument for this: the
+# version tag was only an output directory name while the behaviour lived in mutable source,
+# so v2-v6 cannot now be reproduced. Here the run records its own configuration.
+#
+# RANKED_TOP_K defaults to N_ENSEMBLE because each retained combination costs a training
+# frame (_build_frame in lm_model.py); retaining more than are used is wasted work.
+#
+# Output is ensemble_tidy_wy{YYYY}.csv beside the prediction_* files. The `ensemble_` prefix
+# keeps it invisible to generateHTMLPred.js (which needs a `prediction_acreFt_wy` prefix AND
+# `_combination.csv`) and to 3_MLR_Investigation.py's prediction_mm_wy* glob, so no
+# downstream consumer changes.
+# -------------------------------------------------------------------------
+N_ENSEMBLE = int(os.environ.get('MLR_N_ENSEMBLE', '1'))
+RANKED_TOP_K = int(os.environ.get('MLR_RANKED_TOP_K', str(N_ENSEMBLE)))
+
 
 
 
@@ -200,6 +226,12 @@ if __name__ =="__main__":
         aso_stack_type = 'COMMON_MASK'
     else:
         aso_stack_type = 'SNOWMODEL_IMPUTE'
+    # Optional suffix so a test run writes to e.g. COMMON_MASK_ens10/ instead of overwriting
+    # the production directory copy_generate_html.sh publishes from. Empty by default, so a
+    # plain cron invocation is unchanged. Unlike the FRIANT historic runner there is no
+    # aso_stack_name argument here -- the directory is derived -- so without this an A/B on
+    # the daily path would clobber its own baseline.
+    aso_stack_type = aso_stack_type + os.environ.get('MLR_STACK_SUFFIX', '')
     """
         LOAD DATA -----------------------------------------------
     """
@@ -311,6 +343,7 @@ if __name__ =="__main__":
     # pillows are available, not on the day's actual SWE values, so we can
     # reuse training results for all days that share the same pillow set.
     training_model_cache = {}
+    ensemble_rows = []
 
     n_timesteps = obs_data_test_lst[0].time.shape[0]
     print(f'num timesteps: {n_timesteps - 1}')
@@ -344,13 +377,21 @@ if __name__ =="__main__":
                 mlrPred_dir, current_date, dem_bin.dem_bin, QA_flag=QA_flag,
                 modelNUM=model_num, isMean=False, showOutput=showOutput,
                 saveValidation=False, isCombination_=isCombination,
-                pillowImputation_=pillowImputation_, ds_snowmodel_=sm_train_ds)
+                pillowImputation_=pillowImputation_, ds_snowmodel_=sm_train_ds,
+                capture_ranked=(N_ENSEMBLE > 1), ranked_top_k=RANKED_TOP_K)
+
+        # mark where this day's ensemble rows begin, to annotate them below with the
+        # availability counts. predict_with_cached_training cannot supply these --
+        # all_pils_QA / baseline_pils_ are computed out here in the daily loop.
+        _ens_start = len(ensemble_rows)
 
         try:
             summary_dict_all,df_sheet_lst_mm,df_sheet_lst_acreFt,df_sheet_pillow_lst = lm_model.predict_with_cached_training(
                                                     training_model_cache[cache_key],
                                                     current_vals_df.reset_index(names = 'time'),
                                                     current_date, elev_bin_labels,
+                                                    n_ensemble=N_ENSEMBLE,
+                                                    ensemble_sink=ensemble_rows,
                                                     )
 
             prediction_mm_df,prediction_acreFt_df,prediction_pillow_df = postprocessing.arrange_prediction_tables(df_sheet_lst_mm,
@@ -373,6 +414,15 @@ if __name__ =="__main__":
                                                                                                           prediction_pillow_df,
                                                                                                           )
             print(current_date,' COULD NOT PROCESS MLR!!')
+
+        # Availability recorded explicitly rather than inferred. Using "distinct pillows
+        # across the top-10" as a proxy produced a spurious result on FRIANT: it flagged a
+        # period as low-availability with 3x the spread, when SWE there was ~6mm and the
+        # percentage was just a near-zero denominator.
+        for _r in ensemble_rows[_ens_start:]:
+            _r['n_QA'] = len(all_pils_QA)
+            _r['n_baseline'] = len(baseline_pils_)
+            _r['pillows_QA'] = ','.join(sorted(map(str, all_pils_QA)))
 
                                              
     end = time.time()
@@ -404,6 +454,15 @@ if __name__ =="__main__":
     prediction_mm_df.to_csv(f'{mm_path}prediction_mm_wy{water_year}_combination.csv',index = False)
     prediction_acreFt_df.to_csv(f'{acre_path}prediction_acreFt_wy{water_year}_combination.csv',index = False)
     prediction_pillow_df.to_csv(f'{pillows_path}prediction_pillows_wy{water_year}_combination.csv',index = False)
+
+    if ensemble_rows:
+        ens_df = pd.DataFrame(ensemble_rows).sort_values(
+            ['date','isImpute','elev_band','rank']).reset_index(drop=True)
+        ens_df['n_ensemble'] = N_ENSEMBLE
+        ens_path = f'{dir_path}ensemble_tidy_wy{water_year}.csv'
+        ens_df.to_csv(ens_path, index = False)
+        n_fail = ens_df['error'].notna().sum() if 'error' in ens_df.columns else 0
+        print(f'ENSEMBLE: {len(ens_df)} members written to {ens_path} ({n_fail} failed)')
 
     print('MLR PREDICTION COMPLETE!!!\n')
 

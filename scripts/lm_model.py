@@ -177,7 +177,8 @@ def train_all_mlr_models(aso_tseries_1, obs_data_hist, aso_site_name, all_pils, 
                          modelNUM=None, isMean=False, showOutput=False,
                          saveValidation=False, isCombination_=False,
                          pillowImputation_=True, ds_snowmodel_=None,
-                         impute_cache_suffix=''):
+                         impute_cache_suffix='',
+                         capture_ranked=False, ranked_top_k=50):
     """
     Run cross-validation and station selection once for all (isImpute, elev_band) combos.
     Returns cached training artifacts that can be reused for daily predictions via
@@ -208,13 +209,20 @@ def train_all_mlr_models(aso_tseries_1, obs_data_hist, aso_site_name, all_pils, 
         for elev_band in range(0, len(aso_tseries_1.elev)):
             if showOutput: print('Elev', elev_band)
 
+            # one ranked candidate list per (isImpute, elev_band). None when not requested,
+            # which keeps the selection path byte-identical to before.
+            ranked_sink = [] if capture_ranked else None
+            frames_sink = [] if capture_ranked else None
+
             df_split, summary_dict_model, aso_tseries_2, obs_data_6, rmse = run_mlr_train_predict(
                 aso_tseries_1, obs_data_hist, elev_band, all_pils, all_pils_QA, df_sum_total,
                 baseline_pils, start_wy, end_wy, aso_site_name, isSplit, isAccum, isImpute,
                 isMean, prediction_date, modelID, QA_flag, model_type='MLR',
                 showOutput=showOutput, isCombination=isCombination_,
                 saveValidation=saveValidation, pillowImputation=pillowImputation_,
-                ds_model=ds_snowmodel_, impute_cache_suffix=impute_cache_suffix)
+                ds_model=ds_snowmodel_, impute_cache_suffix=impute_cache_suffix,
+                ranked_sink=ranked_sink, ranked_top_k=ranked_top_k,
+                frames_sink=frames_sink)
 
             selected_pils = summary_dict_model[modelID]['model_features']['features']
             if showOutput: print('elev_band', elev_band, 'selected_pils', selected_pils)
@@ -229,6 +237,8 @@ def train_all_mlr_models(aso_tseries_1, obs_data_hist, aso_site_name, all_pils, 
                 'selected_pils': selected_pils,
                 'area_m2': area_m2,
                 'modelID': modelID,
+                'ranked_combos': ranked_sink,
+                'ranked_frames': frames_sink,
             })
             modelID += 1
 
@@ -237,7 +247,7 @@ def train_all_mlr_models(aso_tseries_1, obs_data_hist, aso_site_name, all_pils, 
 
 def predict_with_cached_training(training_cache, current_vals_df, prediction_date,
                                  labels_from_yaml, add_zeroASO=True, pickledir=None,
-                                 fit_intercept=True):
+                                 fit_intercept=True, n_ensemble=1, ensemble_sink=None):
     """
     Use cached training state to make predictions for a single day.
 
@@ -266,6 +276,9 @@ def predict_with_cached_training(training_cache, current_vals_df, prediction_dat
     df_sheet_mm_lst = []
     df_sheet_acreFt_lst = []
     df_sheet_pillow_lst = []
+    # ensemble members are collected into a caller-supplied list rather than added to the
+    # return tuple, so the 4-tuple contract every existing caller unpacks stays intact.
+    ensemble_rows = ensemble_sink if ensemble_sink is not None else []
 
     for idx, cached in enumerate(training_cache):
         summary_dict_model = copy.deepcopy(cached['summary_dict_model'])
@@ -290,6 +303,53 @@ def predict_with_cached_training(training_cache, current_vals_df, prediction_dat
         summary_dict_model[modelID]['prediction']['mm'].append(float(yhat_mm))
         summary_dict_model[modelID]['prediction']['acre_ft'].append(float(yhat_acreft))
         summary_dict_all = {**summary_dict_all, **summary_dict_model}
+
+        # ---- ensemble members (uncertainty) ----
+        # n_ensemble=1 leaves this block dormant, so the published prediction path above is
+        # untouched. Above rank 1 we re-predict with each next-best combination from the
+        # ranked candidate list, using the same df_split and the same run_daily_prediction.
+        # Rank 1 is `selected_pils`, i.e. exactly the prediction already made above, so the
+        # loop starts at index 1 and rank 1 is recorded from the values above -- refitting it
+        # would be wasted work and an opportunity for the two to disagree.
+        if n_ensemble > 1 and cached.get('ranked_combos'):
+            mf = summary_dict_model[modelID]['model_features']
+            base = {'modelID': modelID, 'elev_band': mf.get('elevation_band'),
+                    'isImpute': mf.get('isImpute'), 'date': str(prediction_date)}
+            ranked = cached['ranked_combos']
+            ensemble_rows.append({**base, 'rank': 1,
+                                  'adj_r2': ranked[0][0] if ranked else None,
+                                  'pillows': ','.join(cached['selected_pils']),
+                                  'pred_mm': float(yhat_mm),
+                                  'pred_acreFt': float(yhat_acreft)})
+            frames = cached.get('ranked_frames') or []
+            for rank, (adj_r2, pils) in enumerate(ranked[1:n_ensemble], start=2):
+                # each member gets the frame built for ITS combination. cached['df_split']
+                # only carries rank 1's pillow columns, so reusing it here raises KeyError on
+                # any member using a pillow outside the winner -- which is most of them.
+                if rank - 1 >= len(frames):
+                    continue
+                member_frame = frames[rank - 1]
+                try:
+                    e_mm, _, _ = run_daily_prediction(
+                        member_frame.copy(), current_vals_df, list(pils), modelID,
+                        conversion=0, area_m2=cached['area_m2'], outdir=None,
+                        add_zeroASO=add_zeroASO, fit_intercept=fit_intercept)
+                    e_af, _, _ = run_daily_prediction(
+                        member_frame.copy(), current_vals_df, list(pils), modelID,
+                        conversion=2, area_m2=cached['area_m2'], outdir=None,
+                        add_zeroASO=add_zeroASO, fit_intercept=fit_intercept)
+                except Exception as exc:
+                    # a single member failing must not take down the published rank-1
+                    # prediction, which is already recorded above.
+                    ensemble_rows.append({**base, 'rank': rank, 'adj_r2': float(adj_r2),
+                                          'pillows': ','.join(map(str, pils)),
+                                          'pred_mm': None, 'pred_acreFt': None,
+                                          'error': f'{type(exc).__name__}: {str(exc)[:160]}'})
+                    continue
+                ensemble_rows.append({**base, 'rank': rank, 'adj_r2': float(adj_r2),
+                                      'pillows': ','.join(map(str, pils)),
+                                      'pred_mm': float(e_mm),
+                                      'pred_acreFt': float(e_af)})
 
         # After each imputation mode's elevation bands, create sheets
         if (idx + 1) % n_elev == 0:
@@ -347,7 +407,8 @@ def run_mlr_train_predict(aso_tseries_1,obs_data_hist,elev_band,all_pils,all_pil
                          aso_site_name,isSplit,isAccum,isImpute,isMean,prediction_date,
                          modelID,QA_flag,model_type = 'MLR',showOutput = False,isCombination = False,
                          saveValidation = False,pillowImputation = True,ds_model = None,
-                         impute_cache_suffix = ''):
+                         impute_cache_suffix = '',ranked_sink = None,ranked_top_k = 50,
+                         frames_sink = None):
     """
     Run single multiple linear regression cross validation and output results in dictionary.
     Input:
@@ -393,7 +454,8 @@ def run_mlr_train_predict(aso_tseries_1,obs_data_hist,elev_band,all_pils,all_pil
                 else:
                     obs_data_5_,pils_removed,df_summary_impute = impute_model_prediction(df_sum_total,all_pils_QA,obs_data_hist,
                                                                                          aso_site_name,prediction_date,
-                                                                                         obs_threshold = 0.50, ds_swed = ds_model)
+                                                                                         obs_threshold = 0.50, ds_swed = ds_model,
+                                                                                         cache_suffix = impute_cache_suffix)
 
             ## split up data into accumlation and melt.
             # df_split = process_melt_accum_thresh(f'./data/summary_table/{aso_site_name}/1000_ft/melt_threshold.csv',
@@ -404,7 +466,8 @@ def run_mlr_train_predict(aso_tseries_1,obs_data_hist,elev_band,all_pils,all_pil
             # predictions_bestfit, predictions_validation, stations2, aso_tseries_2, obs_data_6 = run_cross_val_selection(obs_data_5_,df_split,aso_tseries_1,pils_removed,start_wy,end_wy,
             #                                                                                                              elev_band,isCombination = isCombination,showOutput = showOutput,isMelt = isSplit)
             predictions_allpils, aso_vals, predictions_validation1, predictions_validation2,predictions_bestfit, stations2, aso_tseries_2, obs_data_6 = run_cross_val_selection2(obs_data_5_,df_split,aso_tseries_1,baseline_pils,start_wy,end_wy,
-                                                                                                                     elev_band,isCombination = isCombination,showOutput = showOutput,isMelt = isSplit)
+                                                                                                                     elev_band,isCombination = isCombination,showOutput = showOutput,isMelt = isSplit,
+                                                                                                                     ranked_sink = ranked_sink, top_k = ranked_top_k)
         else:
             ## split up data into accumlation and melt.
             # df_split = process_melt_accum_thresh(f'./data/summary_table/{aso_site_name}/1000_ft/melt_threshold.csv',
@@ -416,7 +479,8 @@ def run_mlr_train_predict(aso_tseries_1,obs_data_hist,elev_band,all_pils,all_pil
             # predictions_bestfit, predictions_validation, stations2, aso_tseries_2, obs_data_6 = run_cross_val_selection(obs_data_hist,df_split,aso_tseries_1,baseline_pils,start_wy,end_wy,
             #                                                                                                              elev_band,isCombination = isCombination,showOutput = showOutput,isMelt = isSplit)
             predictions_allpils, aso_vals, predictions_validation1, predictions_validation2,predictions_bestfit, stations2, aso_tseries_2, obs_data_6 = run_cross_val_selection2(obs_data_hist,df_split,aso_tseries_1,baseline_pils,start_wy,end_wy,
-                                                                                                                     elev_band,isCombination = isCombination,showOutput = showOutput,isMelt = isSplit)
+                                                                                                                     elev_band,isCombination = isCombination,showOutput = showOutput,isMelt = isSplit,
+                                                                                                                     ranked_sink = ranked_sink, top_k = ranked_top_k)
     else:
         if isImpute:
             ## update missing observations with average from flight date.
@@ -428,17 +492,20 @@ def run_mlr_train_predict(aso_tseries_1,obs_data_hist,elev_band,all_pils,all_pil
                 else:
                     obs_data_5_,pils_removed,df_summary_impute = impute_model_prediction(df_sum_total,all_pils_QA,obs_data_hist,
                                                                                          aso_site_name,prediction_date,
-                                                                                         obs_threshold = 0.50, ds_swed = ds_model)
+                                                                                         obs_threshold = 0.50, ds_swed = ds_model,
+                                                                                         cache_suffix = impute_cache_suffix)
 
             # predictions_bestfit, predictions_validation, stations2, aso_tseries_2, obs_data_6 = run_cross_val_selection(obs_data_5_,df_summary_impute,aso_tseries_1,pils_removed,start_wy,end_wy,
             #                                                                                                              elev_band,isCombination = isCombination,showOutput = showOutput,isMelt = isSplit)
             predictions_allpils, aso_vals, predictions_validation1, predictions_validation2,predictions_bestfit, stations2, aso_tseries_2, obs_data_6 = run_cross_val_selection2(obs_data_5_,df_summary_impute,aso_tseries_1,pils_removed,start_wy,end_wy,
-                                                                                                                     elev_band,isCombination = isCombination,showOutput = showOutput,isMelt = isSplit)
+                                                                                                                     elev_band,isCombination = isCombination,showOutput = showOutput,isMelt = isSplit,
+                                                                                                                     ranked_sink = ranked_sink, top_k = ranked_top_k)
         else:
             # predictions_bestfit, predictions_validation, stations2, aso_tseries_2, obs_data_6 = run_cross_val_selection(obs_data_hist,df_sum_total,aso_tseries_1,baseline_pils,start_wy,end_wy, 
             #                                                                                                              elev_band,isCombination = isCombination,showOutput = showOutput,isMelt = isSplit)
             predictions_allpils, aso_vals, predictions_validation1, predictions_validation2,predictions_bestfit, stations2, aso_tseries_2, obs_data_6 = run_cross_val_selection2(obs_data_hist,df_sum_total,aso_tseries_1,baseline_pils,start_wy,end_wy,
-                                                                                                                     elev_band,isCombination = isCombination,showOutput = showOutput,isMelt = isSplit)
+                                                                                                                     elev_band,isCombination = isCombination,showOutput = showOutput,isMelt = isSplit,
+                                                                                                                     ranked_sink = ranked_sink, top_k = ranked_top_k)
 
     if saveValidation:
         # fig = plt.figure(figsize=(10, 13))
@@ -537,11 +604,31 @@ def run_mlr_train_predict(aso_tseries_1,obs_data_hist,elev_band,all_pils,all_pil
                                       modelID,isAccum,isImpute,isMean,title_str,model_type,QA_flag)
 
     
-    df_final = aso_tseries_2[:,elev_band].to_dataframe()
-    for i in stations2:
-        df_inter = obs_data_6[i][obs_data_6[i].time.isin(df_final.index.values)].to_dataframe()
-        df_inter.index.names = ['date']
-        df_final = pd.merge(left = df_final,right = df_inter,left_index = True,right_index=True)
+    def _build_frame(idxs):
+        """
+        Training frame for one pillow combination: ASO column plus one column per pillow,
+        inner-merged. Factored out of the original inline loop so ensemble members can get
+        their own frame built by exactly the same rule as the winner.
+        """
+        frame = aso_tseries_2[:,elev_band].to_dataframe()
+        for i in idxs:
+            df_inter = obs_data_6[i][obs_data_6[i].time.isin(frame.index.values)].to_dataframe()
+            df_inter.index.names = ['date']
+            frame = pd.merge(left = frame,right = df_inter,left_index = True,right_index=True)
+        return frame
+
+    df_final = _build_frame(stations2)
+
+    # Ensemble members need one frame each. Widening df_final to the union of all ranked
+    # combinations is NOT an option: the merges above are inner joins, so folding in pillows
+    # with sparser date coverage would drop rows from the winner's own training set and
+    # change the published prediction. Building per-combination frames keeps every member on
+    # the same footing it would have had if it had won, and leaves df_final untouched.
+    if frames_sink is not None and ranked_sink:
+        name_to_idx = {da.name: i for i, da in enumerate(obs_data_6)}
+        for _adj_r2, pils in ranked_sink:
+            idxs = [name_to_idx[p] for p in pils if p in name_to_idx]
+            frames_sink.append(_build_frame(idxs))
 
     return df_final,summary_dict,aso_tseries_2,obs_data_6,rmse_mm
 
@@ -709,7 +796,8 @@ def run_cross_val_selection(obs_data,df_sum_total,aso_tseries,all_pillows,start_
     return predictions_bestfit, predictions_validation, stations2, aso_tseries_2, obs_data_6
 
 def run_cross_val_selection2(obs_data,df_sum_total,aso_tseries,all_pillows,start_wy,end_wy,
-                            elev_band = -1,isCombination = True,showOutput = True,isMelt = False):
+                            elev_band = -1,isCombination = True,showOutput = True,isMelt = False,
+                            ranked_sink = None, top_k = 50):
     """
         Runs cross-validation approach of linear regression based on year used 
         to run testing.
@@ -765,7 +853,19 @@ def run_cross_val_selection2(obs_data,df_sum_total,aso_tseries,all_pillows,start
         print('Select best stations')
     
     # select best stations.
-    stations2 = identify_best_stations(best_stations,aso_tseries_2,elev_band,summary_data_total,isCombination,showOutput = showOutput)
+    # capture the full ranked candidate list when asked. identify_best_stations yields
+    # indices into obs_data_6; convert to pillow names here, because index positions shift
+    # with the availability set and would be meaningless once serialized.
+    _raw_ranked = [] if ranked_sink is not None else None
+    stations2 = identify_best_stations(best_stations,aso_tseries_2,elev_band,summary_data_total,isCombination,showOutput = showOutput,
+                                       ranked_sink = _raw_ranked)
+    if ranked_sink is not None:
+        names = [da.name for da in obs_data_6]
+        # descending adj_r2; the index tuple breaks ties into a total order so the stored
+        # ordering is reproducible run to run.
+        _raw_ranked.sort(key = lambda r: (-r[0],) + r[1])
+        ranked_sink.extend([(float(a), [names[i] for i in idx])
+                            for a, idx in _raw_ranked[:top_k]])
 
     if showOutput:
         station_print2 = [int(i) for i in stations2]
@@ -1026,7 +1126,8 @@ def get_model(param, x, y):
     return lm
 
 def identify_best_stations(best_stations,aso_tseries_2,elev_band,summary_data_total,
-                           isCombination = True,showOutput = True):
+                           isCombination = True,showOutput = True,
+                           ranked_sink = None):
     """
         Identifies best stations from cross-validation folds using two approaches.
         First, run combination of all selected pillows and select best stations
@@ -1041,6 +1142,14 @@ def identify_best_stations(best_stations,aso_tseries_2,elev_band,summary_data_to
             elev_band - elevation band to run model (note: -1 is entire domain).
             isCombination - boolean to determine which approach to use.
             showOutput - boolean to print output.
+            ranked_sink - optional list. When provided, every candidate combination and its
+                          adjusted R2 is appended as (adj_r2, (idx, ...)) where idx indexes
+                          summary_data_total / obs_data_6. This function is already scoring
+                          every combination and discarding all but the argmax (~62% of
+                          training wall time), so capturing them costs nothing. Indices --
+                          not names -- because obs_data_6 is not in scope here; the caller
+                          maps them. Uncertainty work reads this to predict with the top-N
+                          combinations instead of only the best one.
         Output:
             best_pillows - list of predictions for each cross-validated year.
 
@@ -1063,6 +1172,8 @@ def identify_best_stations(best_stations,aso_tseries_2,elev_band,summary_data_to
                 k_ = len(list(val))
                 adj_r2 = 1 - ((1-r2) * (n_-1)/(n_-k_-1))
                 if showOutput: print(list(val),adj_r2)
+                if ranked_sink is not None:
+                    ranked_sink.append((adj_r2, tuple(val)))
                 if adj_r2 > r2adj_max:
                     best_pils = list(val)
                     r2adj_max = adj_r2
@@ -1173,7 +1284,30 @@ def impute_pillow_prediction(df_sum_total,
     else:
         impute_df_fpath = f'/home/rossamower/work/aso/data/mlr_prediction/{aso_site_name}/imputation/pillow_impute_threePils_wy{prediction_date.year}{cache_suffix}.csv'
     ## if table does not exist.
-    if not os.path.exists(impute_df_fpath) or (saveImputeCSV == False):
+    need_build = (not os.path.exists(impute_df_fpath)) or (saveImputeCSV == False)
+
+    # Coverage guard. pils_removed is recomputed from the CURRENT day's all_pils, but the
+    # cached table's columns are frozen at whatever availability existed when it was first
+    # written. When availability GROWS mid-run, the read-back loop below does
+    # `df_summary_impute[['time', pil_id]]` for a pillow the table never had, raising
+    # KeyError -- and this is called from train_all_mlr_models, which sits outside the
+    # try/except in both mlr_prediction.py and mlr_prediction_historic.py, so it kills the
+    # whole run rather than producing a NaN row.
+    # Observed: FRIANT wy2017, cache written 2016-10-02 without TNY (unavailable that day),
+    # then TNY reported on a later timestep -> KeyError on 'TNY'.
+    # Rebuilding on a coverage miss is monotonic: the table converges to the union of
+    # availability sets seen during the run, after which reads are satisfied.
+    if not need_build:
+        try:
+            cached_cols = set(pd.read_csv(impute_df_fpath, nrows=0).columns)
+        except Exception:
+            cached_cols = set()
+        absent = [p for p in pils_removed if p not in cached_cols]
+        if absent:
+            print(f'  imputation cache missing {absent} -- rebuilding {os.path.basename(impute_df_fpath)}')
+            need_build = True
+
+    if need_build:
 
         for pil in df_dropped_pils.columns:
             df_new = pd.DataFrame(df_dropped_pils[pil])
@@ -1206,6 +1340,16 @@ def impute_pillow_prediction(df_sum_total,
                         first_corr[feat] = adjr2
 
                     # find max correlated pillow.
+                    # first_corr is empty when this row has NO valid pillows at all -- the
+                    # target is NaN and so is every potential predictor. There is nothing to
+                    # impute from, so leave the NaN in place; run_cross_val_selection2's
+                    # missing_times filter will drop the flight, which is the correct outcome.
+                    # All three levels of this search need the same guard: the third was
+                    # already wrapped in try/except, the second was fixed after FRIANT wy1989
+                    # crashed there, and wy1989 then crashed here on the retry. Patching one
+                    # level at a time just moves the failure.
+                    if not first_corr:
+                        continue
                     best_corr_pillow = max(first_corr, key=first_corr.get)
                     best_corr_adjr2 = first_corr[best_corr_pillow]
                     feature_list.append(best_corr_pillow)
@@ -1234,8 +1378,16 @@ def impute_pillow_prediction(df_sum_total,
                         second_corr[feat] = adjr2
 
                     # find max correlated pillow.
-                    second_corr_pillow = max(second_corr, key=second_corr.get)
-                    second_corr_adjr2 = second_corr[second_corr_pillow]
+                    # second_corr is empty when this flight row had exactly one valid pillow:
+                    # the best predictor was just removed from valid_pillows, leaving nothing
+                    # to search. max() then raises ValueError and, because this is reached
+                    # from train_all_mlr_models -- outside the try/except in both callers --
+                    # it kills the whole run. The third level below already guards for this;
+                    # the second did not. Observed on FRIANT wy1989.
+                    # Falling through with feature_list = [best_corr_pillow] is the same
+                    # behavior as second_corr_adjr2 <= best_corr_adjr2, i.e. keep one predictor.
+                    second_corr_pillow = max(second_corr, key=second_corr.get) if second_corr else None
+                    second_corr_adjr2 = second_corr[second_corr_pillow] if second_corr else -np.inf
                     if second_corr_adjr2 > best_corr_adjr2:
                         feature_list.append(second_corr_pillow)
 
@@ -1338,6 +1490,7 @@ def impute_model_prediction(
     saveImputeCSV: bool = True,
     train_start_year: int = 2013,
     predictor_vars=("swed_best", "swed_second", "swed_third"),
+    cache_suffix: str = '',
 ):
     """
     Fit a linear regression model per pillow:
@@ -1373,14 +1526,31 @@ def impute_model_prediction(
     # Subset summary table to only pillows retained
     df_dropped_pils = df_sum_total[pils_removed].copy()
 
-    # Output CSV path
+    # Output CSV path. cache_suffix keys the table to the inputs it was built from -- see
+    # impute_pillow_prediction: this cache is read unconditionally once the file exists and
+    # is never invalidated, so without a suffix a stale table survives an input change.
+    # Defaults to '' so existing callers keep their current paths.
     if prediction_date.month >= 10:
-        impute_df_fpath = f'/home/rossamower/work/aso/data/mlr_prediction/{aso_site_name}/imputation/pillow_impute_threeSnowModelGrids_wy{prediction_date.year+1}.csv'
+        impute_df_fpath = f'/home/rossamower/work/aso/data/mlr_prediction/{aso_site_name}/imputation/pillow_impute_threeSnowModelGrids_wy{prediction_date.year+1}{cache_suffix}.csv'
     else:
-        impute_df_fpath = f'/home/rossamower/work/aso/data/mlr_prediction/{aso_site_name}/imputation/pillow_impute_threeSnowModelGrids_wy{prediction_date.year}.csv'
+        impute_df_fpath = f'/home/rossamower/work/aso/data/mlr_prediction/{aso_site_name}/imputation/pillow_impute_threeSnowModelGrids_wy{prediction_date.year}{cache_suffix}.csv'
 
     # --- 2) Build imputation table (or load it) ---
     need_build = (not os.path.exists(impute_df_fpath)) or (saveImputeCSV is False)
+
+    # Same coverage guard as impute_pillow_prediction: pils_removed tracks the current day's
+    # availability while the cached table's columns are frozen at first write, so a growing
+    # availability set otherwise raises KeyError in the consume loop below (row[pil_id]) from
+    # outside the callers' try/except, killing the run.
+    if not need_build:
+        try:
+            cached_cols = set(pd.read_csv(impute_df_fpath, nrows=0).columns)
+        except Exception:
+            cached_cols = set()
+        absent = [p for p in pils_removed if p not in cached_cols]
+        if absent:
+            print(f'  snowmodel imputation cache missing {absent} -- rebuilding {os.path.basename(impute_df_fpath)}')
+            need_build = True
 
     if need_build:
         # Ensure ds has required predictors
