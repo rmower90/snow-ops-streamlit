@@ -15,7 +15,8 @@ This table is the human index over those.
 |---|---|---|---|---|---|---|
 | `wy2026-baseline` | blended (82,3), 19 manual QA windows | `pillow_wy_1980_2025_qa1.nc` | combinations 1–5, argmax adj R² | `COMMON_MASK/`, `SNOWMODEL_IMPUTE/` | 2026-10-07 | Published WY2026 record, 2025-10-01 → 2026-09-30. The reference. |
 | `wy2026-s82` | **bulk sensor 82**, KUP window only | unchanged | unchanged | `COMMON_MASK_s82/`, `SNOWMODEL_IMPUTE_s82/` | 2026-10-07 | Season only. Helps under SnowModel imputation, hurts under pillow imputation — see below. |
-| `wy2026-s82-ridge` | bulk sensor 82, KUP window only | unchanged | **ridge, inner CV, all pillows** | `COMMON_MASK_s82_ridge/`, `SNOWMODEL_IMPUTE_s82_ridge/` | *not yet run* | — |
+| `wy2026-s82-ridge` | bulk sensor 82, KUP window only | unchanged | **ridge, all pillows, alpha by inner LOWYO** | `COMMON_MASK_s82_ridge/` | 2026-10-08 | Beats every OLS arm mid-season, much worse at the shoulders. Mean MAE 40.4. |
+| `wy2026-s82-ridge-phase` | as above | unchanged | ridge + accumulation/melt indicator | `COMMON_MASK_s82_ridge_phase/` | 2026-10-08 | Helps the shoulders, hurts mid-season. Net worse: 46.2. |
 
 All runs: season model, predict-NaNs, 7 elevation bands, both imputation strategies,
 `N_ENSEMBLE=10`, basin USCASJ, WY2026.
@@ -49,6 +50,56 @@ better than pillow-to-pillow donor search does.
 Three flights, one basin, one water year — directional, not settled. The two remaining
 WY2026 flights (03-03, 05-18) have not been checked. WY2026 ASO was binned directly from the
 raw GeoTIFFs, since those flights were never ingested into `ASO_50M_SWE_TSERIES.nc`.
+
+---
+
+## Arm 3 — ridge
+
+MAE (mm) against the five WY2026 ASO flights, band-mean, season model, predict-NaNs.
+
+| Flight | OLS s82 | OLS-sm s82 | RIDGE | RIDGE+phase |
+|---|---|---|---|---|
+| 2026-01-27 | 58.0 | **25.5** | 70.0 | 60.3 |
+| 2026-03-03 | 30.3 | 33.1 | **31.5** | 62.4 |
+| 2026-03-28 | 33.6 | 22.0 | **20.3** | 33.8 |
+| 2026-04-29 | 39.4 | 27.1 | 22.8 | **21.3** |
+| 2026-05-18 | 41.8 | 38.2 | 57.4 | 53.0 |
+| **mean** | 40.6 | **29.2** | 40.4 | 46.2 |
+
+**Ridge wins three of five flights outright** — all mid-season — and is essentially tied with
+the OLS arm using the same pillow imputation (40.4 vs 40.6). It fails badly at the season
+edges, January 27 and May 18, which is what drags its mean.
+
+**OLS with SnowModel imputation remains best overall at 29.2.** Ridge has not beaten it in
+any configuration tried. Note ridge used *pillow* imputation, so the like-for-like column is
+`OLS s82`; it has not yet been given SnowModel-imputed inputs.
+
+### The phase indicator
+
+Adding an unpenalised accumulation/melt term helps the shoulders (Jan 27: 70.0 -> 60.3,
+May 18: 57.4 -> 53.0) but badly hurts mid-season (Mar 3: 31.5 -> 62.4), and is worse on
+average.
+
+The mechanism is boundary ambiguity. Benefit correlates with distance from the melt onset
+(+0.53 across 35 band-flight pairs): flights within 30 days of the boundary get **worse** by
+21.8 mm on average, flights 60-120 days away get **better** by 22.4 mm.
+
+A binary indicator models two well-separated regimes well and a continuum badly. Earlier
+cross-basin work, where ridge-plus-phase performed best, used **one accumulation and one melt
+flight per year** -- unambiguous, balanced classes. This run used all 35 flights spanning
+January to July, where many sit near an uncertain boundary. The two findings are consistent
+rather than contradictory.
+
+WY2026 onset came from the date of peak SnowModel SWE per band -- causal, so usable in real
+time. Training-side phase came from `melt_threshold.csv`, which stops at WY2025 and carries
+duplicate `(water_year, elev_bin)` rows (100 where 9 x 8 = 72). The two sides therefore use
+different onset definitions; acceptable for a test, not for a result.
+
+### Next
+
+Test one accumulation and one melt training flight per year, for both OLS-sensor-82 and
+ridge. Less training data, but possibly less noise -- and it is the configuration under which
+ridge-plus-phase previously won.
 
 ---
 
