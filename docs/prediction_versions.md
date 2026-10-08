@@ -52,6 +52,21 @@ raw GeoTIFFs, since those flights were never ingested into `ASO_50M_SWE_TSERIES.
 
 ---
 
+## Known defect affecting all arms
+
+`imputation_w_pillows` compares adjusted R² across two different datasets — single donors are
+scored on the whole record, pairs on 2013 onward only — so its forward search almost always
+runs to three donors regardless of whether the third helps. Measured uplift from the dataset
+change alone is +0.147 mean adjusted R² across 750 USCASJ pillow pairs.
+
+This affects the predict-NaNs half of **every arm equally**, so it does not bias the
+comparison between them. It is deliberately left unfixed until the arms are complete; fixing
+it mid-sequence would mean arm 3 differed from arms 1 and 2 by more than the model.
+
+Full detail and the rest of the backlog: [`pending_fixes.md`](pending_fixes.md).
+
+---
+
 ## Why training data is held constant
 
 The sensor-82 experiment varies **test** data only. On the 35 ASO flight dates the model
