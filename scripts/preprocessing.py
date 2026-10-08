@@ -195,8 +195,12 @@ def imputation_w_pillows(df_sum_total: pd.DataFrame,
     # impute_df_fpath = f'./data/summary_table/{aso_site_name}/test/pillow_impute_MLR.csv'
 
     ## create output fpath name.
-    if not os.path.exists(impute_dir):
-        os.makedirs(impute_dir)
+    # exist_ok, not a check-then-create: the six nightly prediction jobs are submitted
+    # together and share this directory, so two can pass the existence check before either
+    # creates it. Latent for as long as imputation/ already existed; it surfaced the moment
+    # MLR_STACK_SUFFIX pointed a concurrent pair at a fresh imputation_<suffix>/.
+    # imputation_w_snowmodel() below already had the safe form.
+    os.makedirs(impute_dir, exist_ok=True)
         
     impute_df_fpath = f'{impute_dir}/pillow_impute_threePils_wy{water_year}.csv'
 

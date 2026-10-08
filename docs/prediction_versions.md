@@ -14,11 +14,41 @@ This table is the human index over those.
 | ID | Test pillows | Training pillows | Model | Output | Run | Finding |
 |---|---|---|---|---|---|---|
 | `wy2026-baseline` | blended (82,3), 19 manual QA windows | `pillow_wy_1980_2025_qa1.nc` | combinations 1–5, argmax adj R² | `COMMON_MASK/`, `SNOWMODEL_IMPUTE/` | 2026-10-07 | Published WY2026 record, 2025-10-01 → 2026-09-30. The reference. |
-| `wy2026-s82` | **bulk sensor 82**, KUP window only | unchanged | unchanged | `COMMON_MASK_s82/`, `SNOWMODEL_IMPUTE_s82/` | *not yet run* | — |
+| `wy2026-s82` | **bulk sensor 82**, KUP window only | unchanged | unchanged | `COMMON_MASK_s82/`, `SNOWMODEL_IMPUTE_s82/` | 2026-10-07 | Season only. Helps under SnowModel imputation, hurts under pillow imputation — see below. |
 | `wy2026-s82-ridge` | bulk sensor 82, KUP window only | unchanged | **ridge, inner CV, all pillows** | `COMMON_MASK_s82_ridge/`, `SNOWMODEL_IMPUTE_s82_ridge/` | *not yet run* | — |
 
 All runs: season model, predict-NaNs, 7 elevation bands, both imputation strategies,
 `N_ENSEMBLE=10`, basin USCASJ, WY2026.
+
+---
+
+## Results so far
+
+Validated against the WY2026 ASO flights, band-mean SWE, season model, predict-NaNs. MAE in
+mm against the observed flight.
+
+| Flight | pillow-imp baseline | pillow-imp s82 | snowmodel-imp baseline | **snowmodel-imp s82** |
+|---|---|---|---|---|
+| 2026-01-27 | 37.7 | 58.0 | 35.2 | **25.5** |
+| 2026-03-28 | 32.5 | 33.6 | 22.9 | **22.0** |
+| 2026-04-29 | 29.5 | 39.4 | 27.3 | **27.1** |
+| mean | 33.2 | 43.7 | 28.5 | **24.9** |
+
+Two patterns, consistent across all three flights:
+
+**Imputation strategy matters more than the sensor change.** SnowModel imputation beats
+pillow imputation in every arm. The sensor switch moves MAE by 1–3 mm; the imputation choice
+moves it by about 10 mm.
+
+**Sensor-82 interacts with imputation strategy.** It improves SnowModel imputation on all
+three flights and degrades pillow imputation on all three. A plausible reading: the
+sensor-82 QA retains 34% more pillow values (7,347 vs 5,489) because it carries 1 exclusion
+window instead of 19, and regression against SnowModel grids tolerates those marginal values
+better than pillow-to-pillow donor search does.
+
+Three flights, one basin, one water year — directional, not settled. The two remaining
+WY2026 flights (03-03, 05-18) have not been checked. WY2026 ASO was binned directly from the
+raw GeoTIFFs, since those flights were never ingested into `ASO_50M_SWE_TSERIES.nc`.
 
 ---
 

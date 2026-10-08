@@ -500,7 +500,10 @@ if __name__ =="__main__":
                 return None
         def _git(*a):
             try:
-                return subprocess.check_output(['git',*a], cwd=os.path.dirname(os.path.abspath(__file__)),
+                # realpath, not abspath: this script is invoked through a symlink in
+                # bin/, and abspath keeps the symlink's directory -- which is not a git
+                # repo, so every field came back null. realpath resolves to scripts/.
+                return subprocess.check_output(['git',*a], cwd=os.path.dirname(os.path.realpath(__file__)),
                                                stderr=subprocess.DEVNULL, text=True).strip()
             except Exception:
                 return None
